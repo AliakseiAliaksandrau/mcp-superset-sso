@@ -78,6 +78,7 @@ def caller_email() -> str:
     email = str(email).strip().lower()
     domain = email.rpartition("@")[2]
     if _allowed_domains and domain not in _allowed_domains:
+        logger.warning("Rejected caller %s: domain not allowed", email)
         raise SupersetIdentityError(
             f"Account {email} is not allowed on this server (allowed domains: {', '.join(sorted(_allowed_domains))})."
         )

@@ -17,6 +17,16 @@ from mcp_superset.tools import register_all_tools
 
 logger = logging.getLogger(__name__)
 
+# Our own log lines (which user a call acts as, rejected callers) must be visible
+# without turning on httpx's per-request INFO chatter, so the root stays at WARNING
+# and only this package is raised.
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s.%(msecs)03d %(levelname)-5s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logging.getLogger("mcp_superset").setLevel(os.getenv("SUPERSET_MCP_LOG_LEVEL", "INFO").upper())
+
 # Load .env - custom path via env var, or auto-detect from package directory
 _custom_env = os.environ.get("SUPERSET_MCP_ENV_FILE")
 if _custom_env:
@@ -58,6 +68,10 @@ TOKEN_TTL = int(os.getenv("SUPERSET_MCP_TOKEN_TTL", "600"))
 # (or when a client's CIMD document is rejected): clients then fall back to dynamic
 # client registration, which needs no outbound call.
 ENABLE_CIMD = _flag("SUPERSET_MCP_ENABLE_CIMD", True)
+# Where to keep OAuth client registrations. Without a directory they live in memory,
+# so every restart invalidates the registrations clients hold and each user has to
+# authorize again; a directory on a volume survives restarts.
+CLIENT_STORE_DIR = os.getenv("SUPERSET_MCP_CLIENT_STORE_DIR", "").strip()
 AUTO_CREATE_USERS = _flag("SUPERSET_MCP_AUTO_CREATE_USERS", False)
 DEFAULT_ROLE = os.getenv("SUPERSET_MCP_DEFAULT_ROLE", "Gamma")
 
@@ -111,6 +125,12 @@ if AUTH_MODE == "google-sso":
     if hosted_domain:
         extra_authorize_params["hd"] = hosted_domain
 
+    client_storage = None
+    if CLIENT_STORE_DIR:
+        from key_value.aio.stores.filetree import FileTreeStore
+
+        client_storage = FileTreeStore(data_directory=CLIENT_STORE_DIR)
+
     fastmcp_auth = GoogleProvider(
         client_id=google_client_id,
         client_secret=google_client_secret,
@@ -118,6 +138,7 @@ if AUTH_MODE == "google-sso":
         required_scopes=["openid", "email", "profile"],
         extra_authorize_params=extra_authorize_params or None,
         enable_cimd=ENABLE_CIMD,
+        client_storage=client_storage,
     )
 
     user_registry = UserClientRegistry(
@@ -172,12 +193,13 @@ async def health_check(request: Request) -> JSONResponse:
 
 
 logger.info(
-    "mcp-superset %s starting: superset=%s auth_mode=%s allowed_domains=%s cimd=%s",
+    "mcp-superset %s starting: superset=%s auth_mode=%s allowed_domains=%s cimd=%s client_store=%s",
     __version__,
     SUPERSET_BASE_URL,
     AUTH_MODE,
     ",".join(sorted(ALLOWED_DOMAINS)) or "*",
     ENABLE_CIMD,
+    CLIENT_STORE_DIR or "memory",
 )
 
 
