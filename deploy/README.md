@@ -13,7 +13,10 @@ Superset docker-compose deployment.
 
 1. **DNS + TLS** — point the public hostname at the reverse proxy and issue a
    certificate (`certbot --nginx -d mcp-sso.example.com`). Google only redirects
-   to HTTPS, so this comes first.
+   to HTTPS, so this comes first. No DNS access? An existing hostname works too:
+   add the server's routes as extra `location` blocks on a vhost whose root paths
+   are free (variant B in `nginx-mcp-sso.conf.example`) and set
+   `SUPERSET_MCP_PUBLIC_URL` to that hostname.
 2. **Google OAuth client** (Web application) — add
    `https://mcp-sso.example.com/auth/callback` as an authorized redirect URI.
    Put the client id and secret in `docker/.env-local`:

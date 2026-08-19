@@ -1,10 +1,18 @@
-# Reverse proxy for mcp-superset-sso.
+# Reverse proxy for mcp-superset-sso, two variants.
 #
-# Unlike a service-account MCP behind a secret path, this vhost must expose the
-# whole origin: MCP clients discover OAuth metadata under /.well-known/, and the
-# OAuth endpoints (/authorize, /token, /register, /auth/callback) live at the root.
-# Authentication is the server's job - never inject an Authorization header here.
+# Unlike a service-account MCP behind a secret path, this server needs real paths
+# at the origin root: clients discover OAuth metadata under /.well-known/ and the
+# OAuth endpoints (/authorize, /token, /register, /consent, /auth/callback) live at
+# the root. Authentication is the server's job - never inject an Authorization
+# header here.
+#
+# Routes served by the app: /mcp, /health, /.well-known/oauth-authorization-server,
+# /.well-known/oauth-protected-resource/mcp, /authorize, /token, /register,
+# /consent, /auth/callback.
 
+# ---------------------------------------------------------------------------
+# Variant A - dedicated hostname (preferred): the whole origin is the MCP server.
+# ---------------------------------------------------------------------------
 server {
     server_name mcp-sso.example.com;
     server_tokens off;
@@ -44,3 +52,31 @@ server {
     server_name mcp-sso.example.com;
     return 301 https://$host$request_uri;
 }
+
+# ---------------------------------------------------------------------------
+# Variant B - share an existing hostname (no new DNS record or certificate).
+# Add these locations to that vhost; everything else there keeps working, because
+# nginx prefers the more specific location. Set SUPERSET_MCP_PUBLIC_URL to the
+# shared hostname.
+#
+# The metadata prefix is /.well-known/oauth- and NOT /.well-known/, so that
+# certbot's /.well-known/acme-challenge/ still reaches nginx on renewal.
+# ---------------------------------------------------------------------------
+#   location ^~ /.well-known/oauth- { include snippets/mcp-sso.conf; }
+#   location = /authorize          { include snippets/mcp-sso.conf; }
+#   location = /token              { include snippets/mcp-sso.conf; }
+#   location = /register           { include snippets/mcp-sso.conf; }
+#   location = /consent            { include snippets/mcp-sso.conf; }
+#   location ^~ /auth/             { include snippets/mcp-sso.conf; }   # /auth/callback
+#   location = /mcp                { include snippets/mcp-sso.conf; }
+#   location ^~ /mcp/              { include snippets/mcp-sso.conf; }
+#
+#   # Health under its own path, so it does not collide with the host's own /health.
+#   location = /mcp-sso-health {
+#       include snippets/mcp-sso.conf;
+#       rewrite ^.*$ /health break;
+#   }
+#
+# where snippets/mcp-sso.conf holds the proxy_pass and the proxy_* directives from
+# variant A. Do not share the hostname with an app that already serves any of these
+# paths (Superset itself, for instance, may expose /health and /mcp).
