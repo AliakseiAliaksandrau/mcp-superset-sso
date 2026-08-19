@@ -24,11 +24,15 @@ services:
       # Public HTTPS URL of this server; Google redirects to <URL>/auth/callback.
       SUPERSET_MCP_PUBLIC_URL: https://mcp-sso.example.com
       SUPERSET_MCP_ALLOWED_DOMAINS: example.com
+      # Keeps OAuth client registrations across restarts (volume below).
+      SUPERSET_MCP_CLIENT_STORE_DIR: /data/oauth-clients
       # Superset's SECRET_KEY, used to mint each caller's Superset API token.
       SUPERSET_JWT_SECRET: ${SUPERSET_SECRET_KEY}
       # GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET come from docker/.env-local
       # An empty file keeps the package from picking up a stray .env.
       SUPERSET_MCP_ENV_FILE: /dev/null
+    volumes:
+      - mcp_sso_state:/data
     ports:
       - "8002:8001"
     depends_on:
@@ -44,3 +48,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+volumes:
+  mcp_sso_state:

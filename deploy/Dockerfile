@@ -13,7 +13,13 @@ COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 
 RUN pip install --no-cache-dir . \
-    && useradd --create-home --uid 10001 mcp
+    && useradd --create-home --uid 10001 mcp \
+    && mkdir -p /data \
+    && chown mcp /data
+
+# Mount a volume here and point SUPERSET_MCP_CLIENT_STORE_DIR at it so OAuth client
+# registrations survive a restart (otherwise every user re-authorizes after a deploy).
+VOLUME ["/data"]
 
 USER mcp
 
