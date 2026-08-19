@@ -7,7 +7,7 @@ from mcp_superset.tools.types import IntList
 
 def register_group_tools(mcp):
     """Register all group management tools with the MCP server."""
-    from mcp_superset.server import superset_client as client
+    from mcp_superset.context import current_client as client
 
     # === Groups ===
 

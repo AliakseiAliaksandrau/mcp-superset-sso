@@ -8,7 +8,7 @@ from mcp_superset.tools.types import IntList
 
 def register_security_tools(mcp):
     """Register all security-related MCP tools on the given server instance."""
-    from mcp_superset.server import superset_client as client
+    from mcp_superset.context import current_client as client
 
     # === Current user ===
 

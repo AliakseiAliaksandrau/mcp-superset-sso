@@ -1,7 +1,7 @@
 [project]
-name = "mcp-superset"
-version = "0.3.1"
-description = "MCP server for managing Apache Superset — dashboards, charts, datasets, SQL Lab, access control, and more"
+name = "mcp-superset-sso"
+version = "0.4.0"
+description = "MCP server for Apache Superset that acts as the signed-in SSO user (fork of bintocher/mcp-superset)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -34,6 +34,7 @@ dependencies = [
     "fastmcp>=3.1.0",
     "httpx>=0.27",
     "pydantic>=2.0",
+    "pyjwt>=2.8",
     "python-dotenv>=1.0",
 ]
 
@@ -48,13 +49,14 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/bintocher/mcp-superset"
-Repository = "https://github.com/bintocher/mcp-superset"
-Issues = "https://github.com/bintocher/mcp-superset/issues"
-Changelog = "https://github.com/bintocher/mcp-superset/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/AliakseiAliaksandrau/mcp-superset-sso"
+Repository = "https://github.com/AliakseiAliaksandrau/mcp-superset-sso"
+Issues = "https://github.com/AliakseiAliaksandrau/mcp-superset-sso/issues"
+Upstream = "https://github.com/bintocher/mcp-superset"
 
 [project.scripts]
 mcp-superset = "mcp_superset.__main__:main"
+mcp-superset-selftest = "mcp_superset.selftest:main"
 
 [build-system]
 requires = ["hatchling"]

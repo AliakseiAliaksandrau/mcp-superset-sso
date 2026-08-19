@@ -301,7 +301,7 @@ def register_chart_tools(mcp):
     Args:
         mcp: The MCP server instance to register tools on.
     """
-    from mcp_superset.server import superset_client as client
+    from mcp_superset.context import current_client as client
 
     @mcp.tool
     async def superset_chart_list(

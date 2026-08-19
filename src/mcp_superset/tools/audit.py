@@ -33,7 +33,7 @@ async def _build_role_permissions_map(client: Any) -> dict[int, set[int]]:
 
 def register_audit_tools(mcp):
     """Register audit tools with the MCP server."""
-    from mcp_superset.server import superset_client as client
+    from mcp_superset.context import current_client as client
 
     @mcp.tool
     async def superset_permissions_audit(

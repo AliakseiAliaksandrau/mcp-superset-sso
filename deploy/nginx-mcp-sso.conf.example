@@ -1,0 +1,46 @@
+# Reverse proxy for mcp-superset-sso.
+#
+# Unlike a service-account MCP behind a secret path, this vhost must expose the
+# whole origin: MCP clients discover OAuth metadata under /.well-known/, and the
+# OAuth endpoints (/authorize, /token, /register, /auth/callback) live at the root.
+# Authentication is the server's job - never inject an Authorization header here.
+
+server {
+    server_name mcp-sso.example.com;
+    server_tokens off;
+
+    location / {
+        proxy_pass http://10.0.0.2:8002;   # host:port of the MCP container
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # streamable-http streams responses - nginx must not buffer them,
+        # otherwise larger tool replies stall while small ones pass.
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+
+        proxy_read_timeout 3600s;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 3600s;
+
+        proxy_redirect http:// https://;
+    }
+
+    listen 443 ssl;                        # certificate managed by certbot
+    # ssl_certificate     /etc/letsencrypt/live/mcp-sso.example.com/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/mcp-sso.example.com/privkey.pem;
+}
+
+server {
+    listen 80;
+    server_name mcp-sso.example.com;
+    return 301 https://$host$request_uri;
+}

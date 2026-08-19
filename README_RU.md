@@ -1,23 +1,100 @@
-# mcp-superset
+# mcp-superset-sso
 
-[![PyPI version](https://img.shields.io/pypi/v/mcp-superset.svg)](https://pypi.org/project/mcp-superset/)
-[![PyPI downloads](https://img.shields.io/pypi/dm/mcp-superset.svg)](https://pypi.org/project/mcp-superset/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/bintocher/mcp-superset/actions/workflows/ci.yml/badge.svg)](https://github.com/bintocher/mcp-superset/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/bintocher/mcp-superset/actions/workflows/codeql.yml/badge.svg)](https://github.com/bintocher/mcp-superset/actions/workflows/codeql.yml)
-
-[![Superset 6.0.1](https://img.shields.io/badge/Superset-6.0.1-orange.svg)](https://superset.apache.org/)
+[![Superset 6.x](https://img.shields.io/badge/Superset-6.x-orange.svg)](https://superset.apache.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io/)
-[![Typed](https://img.shields.io/badge/typed-py.typed-blue.svg)](https://peps.python.org/pep-0561/)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
-[![Tools: 137](https://img.shields.io/badge/MCP_tools-128%2B-brightgreen.svg)](#available-tools-128)
-[![GitHub stars](https://img.shields.io/github/stars/bintocher/mcp-superset.svg?style=social)](https://github.com/bintocher/mcp-superset)
 
 [English](README.md) | **Русский**
 
-Полнофункциональный [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) сервер для [Apache Superset](https://superset.apache.org/). Предоставляет AI-ассистентам (Claude, GPT и др.) полный контроль над инстансом Superset — дашборды, графики, датасеты, SQL Lab, пользователи, роли, RLS и многое другое — через 137 инструментов.
+[MCP](https://modelcontextprotocol.io/)-сервер для [Apache Superset](https://superset.apache.org/), который умеет работать **от имени вызывающего пользователя**: человек логинится через Google, и каждый вызов инструмента выполняется под его собственной учётной записью Superset — его роли, RLS, владение объектами и записи в журнале действий.
+
+Форк [bintocher/mcp-superset](https://github.com/bintocher/mcp-superset) (MIT, v0.3.1) — все 137 инструментов и их поведение взяты из upstream. Что добавлено в форке:
+
+- **идентификация каждого пользователя через Google SSO** (`SUPERSET_MCP_AUTH_MODE=google-sso`, см. ниже);
+- поддержка `description` в `superset_chart_create` / `superset_chart_update`;
+- `superset_get_current_user` — показывает, от чьего имени сейчас работают инструменты;
+- `mcp-superset-selftest` — проверка работы от имени пользователя на живом Superset без браузера.
+
+Поведение upstream (один сервисный аккаунт на всех) осталось режимом по умолчанию, поэтому существующие установки ничего не теряют.
+
+## Работа от имени пользователя (Google SSO)
+
+### Зачем
+
+В режиме `service` сервер держит один логин Superset: все пользователи MCP получают права этого аккаунта, и в журнале действий Superset все изменения записаны на него. В режиме `google-sso` цепочка идентификации такая:
+
+```
+MCP-клиент  --OAuth 2.1-->  этот сервер  --redirect-->  Google (hd=<ваш домен>)
+                                 |  <- access token, подтверждённый email
+                                 v
+                     email  ->  пользователь Superset (поиск по email)
+                                 |
+                                 v
+              API-токен Superset, выпущенный для его user_id  ->  все вызовы /api/v1
+```
+
+У пользователей, созданных через SSO, нет пароля, пригодного для `POST /api/v1/security/login`, поэтому сервер выпускает ровно такой же токен Flask-JWT-Extended, какой Superset выдаёт сам: HS256, `sub` = id пользователя, подпись ключом `SECRET_KEY` Superset (`JWT_SECRET_KEY`). Дальше Superset сам применяет права этого пользователя — никакой логики прав в MCP-сервере не дублируется.
+
+### Настройка
+
+```bash
+SUPERSET_MCP_AUTH_MODE=google-sso
+
+# Публичный HTTPS-адрес этого сервера (под ним лежат OAuth-метаданные и redirect от Google)
+SUPERSET_MCP_PUBLIC_URL=https://mcp.example.com
+
+# OAuth-клиент Google (тип Web application)
+GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-...
+
+# SECRET_KEY / JWT_SECRET_KEY вашего Superset
+SUPERSET_JWT_SECRET=...
+
+# Домены, которым разрешён доступ (также ограничивает выбор аккаунта в Google)
+SUPERSET_MCP_ALLOWED_DOMAINS=example.com
+
+# Сервисный аккаунт — нужен только чтобы найти пользователя Superset по email (права Admin)
+SUPERSET_BASE_URL=http://superset:8088
+SUPERSET_USERNAME=mcp_service
+SUPERSET_PASSWORD=...
+```
+
+Дополнительно: `SUPERSET_MCP_TOKEN_TTL` (время жизни выпускаемого токена, по умолчанию 600 с), `GOOGLE_HOSTED_DOMAIN`, `SUPERSET_JWT_ALGORITHM`, `SUPERSET_MCP_AUTO_CREATE_USERS` + `SUPERSET_MCP_DEFAULT_ROLE`.
+
+Автосоздание пользователей выключено по умолчанию: Flask-AppBuilder формирует username из данных OAuth-провайдера, поэтому заранее созданная здесь запись с другим username может конфликтовать с SSO-входом по уникальному email. Лучше дать человеку один раз войти в Superset через Google — учётная запись создастся сама, а сервер найдёт её по email.
+
+### Настройка в Google Cloud
+
+В OAuth-клиенте (Web application) добавьте authorized redirect URI:
+
+```
+https://<SUPERSET_MCP_PUBLIC_URL>/auth/callback
+```
+
+Тот же клиент может обслуживать и вход в UI Superset (`https://<superset-host>/oauth-authorized/google`).
+
+### Проверка
+
+```bash
+# без браузера: находит пользователя по email, выпускает его токен, обращается к Superset
+mcp-superset-selftest someone@example.com
+
+# что сервер сообщает о себе
+curl https://mcp.example.com/health
+
+# без авторизации запросы отклоняются с OAuth-челленджем
+curl -i -X POST https://mcp.example.com/mcp
+```
+
+Из MCP-клиента вызовите `superset_get_current_user` — он вернёт учётную запись Superset, от имени которой работают инструменты.
+
+### Безопасность
+
+- Процесс может действовать от имени любого пользователя Superset, поэтому к `SUPERSET_JWT_SECRET` относитесь как к самому секрету Superset: храните в env-файле, доступном только сервису, и ротируйте одновременно в обоих местах.
+- Всегда терминируйте TLS перед сервером — Google делает redirect только на HTTPS.
+- Держите `SUPERSET_MCP_ALLOWED_DOMAINS` заполненным: без него доступ к поиску по email получит любой Google-аккаунт, который принимает OAuth-клиент.
+- Референс-конфигурация Docker и nginx — в каталоге [`deploy/`](deploy/).
 
 ## Сравнение с другими MCP-серверами для Superset
 
@@ -80,16 +157,21 @@
 
 ### Установка
 
+Форк не публикуется в PyPI — ставится из git:
+
 ```bash
-# Из PyPI
-pip install mcp-superset
+# pip
+pip install "git+https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git@main"
 
-# Через uv (рекомендуется)
-uv pip install mcp-superset
+# uv (рекомендуется)
+uv pip install "git+https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git@main"
 
-# Запуск без установки (uvx)
-uvx mcp-superset
+# Из клона (editable, для разработки)
+git clone https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git
+cd mcp-superset-sso && uv pip install -e ".[dev]"
 ```
+
+Развёртывание в контейнере — см. [`deploy/`](deploy/).
 
 ### Конфигурация
 
@@ -140,11 +222,8 @@ gitignore), а не в истории команд и не в закоммиче
 ### Запуск
 
 ```bash
-# Через CLI (после pip install)
+# Через CLI (после установки)
 mcp-superset
-
-# Запуск без установки
-uvx mcp-superset
 
 # Через Python-модуль
 python -m mcp_superset
@@ -189,7 +268,7 @@ mcp-superset --transport stdio
 }
 ```
 
-Затем запустите сервер: `mcp-superset` или `uvx mcp-superset`.
+Затем запустите сервер: `mcp-superset` (см. [Запуск](#запуск)).
 
 #### Claude Desktop
 

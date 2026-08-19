@@ -7,7 +7,7 @@ from mcp_superset.tools.helpers import parse_json_arg
 
 
 def register_system_tools(mcp):
-    from mcp_superset.server import superset_client as client
+    from mcp_superset.context import current_client as client
 
     # === Reports / Alerts ===
 
@@ -296,6 +296,27 @@ def register_system_tools(mcp):
         from mcp_superset.server import SUPERSET_BASE_URL
 
         return json.dumps({"base_url": SUPERSET_BASE_URL}, ensure_ascii=False)
+
+    @mcp.tool
+    async def superset_get_current_user() -> str:
+        """Get the Superset user the tools are currently acting as.
+
+        Returns username, name, e-mail and roles from /api/v1/me/. In per-user
+        (SSO) mode this is the signed-in user, so it confirms whose permissions
+        apply; in service mode it is the shared service account.
+        """
+        from mcp_superset.context import per_user_mode, resolve_identity
+
+        result = await client.get("/api/v1/me/")
+        payload = {"per_user_mode": per_user_mode(), "user": result.get("result", result)}
+        identity = await resolve_identity()
+        if identity is not None:
+            payload["acting_as"] = {
+                "id": identity.id,
+                "username": identity.username,
+                "email": identity.email,
+            }
+        return json.dumps(payload, ensure_ascii=False)
 
     # === Annotation Layer CRUD ===
 

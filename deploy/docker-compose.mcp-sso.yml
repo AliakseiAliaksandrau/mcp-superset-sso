@@ -1,0 +1,46 @@
+# Service definition to add to the Superset docker-compose file.
+#
+# Assumes this repository is cloned next to that compose file (./mcp-superset-sso)
+# and that the Superset app service is reachable as `superset` on the same network.
+# Secrets belong in docker/.env-local (gitignored), not here.
+services:
+  superset-mcp-sso:
+    build:
+      context: ./mcp-superset-sso
+      dockerfile: deploy/Dockerfile
+    container_name: superset_mcp_sso
+    restart: unless-stopped
+    env_file:
+      - path: docker/.env
+        required: true
+      - path: docker/.env-local
+        required: false
+    environment:
+      SUPERSET_BASE_URL: http://superset:8088
+      SUPERSET_MCP_HOST: 0.0.0.0
+      SUPERSET_MCP_PORT: "8001"
+      SUPERSET_MCP_TRANSPORT: streamable-http
+      SUPERSET_MCP_AUTH_MODE: google-sso
+      # Public HTTPS URL of this server; Google redirects to <URL>/auth/callback.
+      SUPERSET_MCP_PUBLIC_URL: https://mcp-sso.example.com
+      SUPERSET_MCP_ALLOWED_DOMAINS: example.com
+      # Superset's SECRET_KEY, used to mint each caller's Superset API token.
+      SUPERSET_JWT_SECRET: ${SUPERSET_SECRET_KEY}
+      # GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET come from docker/.env-local
+      # An empty file keeps the package from picking up a stray .env.
+      SUPERSET_MCP_ENV_FILE: /dev/null
+    ports:
+      - "8002:8001"
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health').read()\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

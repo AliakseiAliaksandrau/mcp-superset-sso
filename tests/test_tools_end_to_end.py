@@ -13,7 +13,8 @@ import pytest
 import respx
 from fastmcp import Client, FastMCP
 
-import mcp_superset.server as server_module
+import mcp_superset.server as server_module  # noqa: F401 - imported for env/config parity
+from mcp_superset import context
 from mcp_superset.auth import CookieAuthManager
 from mcp_superset.client import SupersetClient
 from mcp_superset.tools import register_all_tools
@@ -22,10 +23,11 @@ BASE = "https://superset.example.com"
 
 
 @pytest.fixture
-def mcp_server(monkeypatch):
+def mcp_server():
     """An MCP server whose tools talk to a SupersetClient we can mock with respx."""
     client = SupersetClient(auth_manager=CookieAuthManager(base_url=BASE, cookie_value="c"), base_url=BASE)
-    monkeypatch.setattr(server_module, "superset_client", client)
+    # Service mode: no registry, so every tool call resolves to this client.
+    context.configure(service_client=client)
     mcp = FastMCP(name="test")
     register_all_tools(mcp)
     yield mcp

@@ -4,7 +4,7 @@ import json
 
 
 def register_database_tools(mcp):
-    from mcp_superset.server import superset_client as client
+    from mcp_superset.context import current_client as client
 
     @mcp.tool
     async def superset_database_list(

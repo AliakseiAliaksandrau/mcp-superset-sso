@@ -1,23 +1,98 @@
-# mcp-superset
+# mcp-superset-sso
 
-<!-- mcp-name: io.github.bintocher/mcp-superset -->
-
-[![PyPI version](https://img.shields.io/pypi/v/mcp-superset.svg)](https://pypi.org/project/mcp-superset/)
-[![PyPI downloads](https://img.shields.io/pypi/dm/mcp-superset.svg)](https://pypi.org/project/mcp-superset/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/bintocher/mcp-superset/actions/workflows/ci.yml/badge.svg)](https://github.com/bintocher/mcp-superset/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/bintocher/mcp-superset/actions/workflows/codeql.yml/badge.svg)](https://github.com/bintocher/mcp-superset/actions/workflows/codeql.yml)
-
-[![Superset 6.0.1](https://img.shields.io/badge/Superset-6.0.1-orange.svg)](https://superset.apache.org/)
+[![Superset 6.x](https://img.shields.io/badge/Superset-6.x-orange.svg)](https://superset.apache.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io/)
-[![Typed](https://img.shields.io/badge/typed-py.typed-blue.svg)](https://peps.python.org/pep-0561/)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
-[![Tools: 137](https://img.shields.io/badge/MCP_tools-132%2B-brightgreen.svg)](#available-tools-132)
-[![GitHub stars](https://img.shields.io/github/stars/bintocher/mcp-superset.svg?style=social)](https://github.com/bintocher/mcp-superset)
 
-A comprehensive [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for [Apache Superset](https://superset.apache.org/). Gives AI assistants (Claude, GPT, etc.) full control over your Superset instance — dashboards, charts, datasets, SQL Lab, users, roles, RLS, and more — through 137 tools.
+A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for [Apache Superset](https://superset.apache.org/) that can act **as the user who is calling it**: the caller signs in with Google, and every tool call runs under their own Superset account — their roles, row-level security, ownership and audit-log entries.
+
+Fork of [bintocher/mcp-superset](https://github.com/bintocher/mcp-superset) (MIT, v0.3.1) — all 137 tools and their behaviour come from upstream. This fork adds:
+
+- **per-user identity via Google SSO** (`SUPERSET_MCP_AUTH_MODE=google-sso`, see below);
+- `description` support in `superset_chart_create` / `superset_chart_update`;
+- `superset_get_current_user` — reports which Superset user the tools are acting as;
+- `mcp-superset-selftest` — verifies impersonation against a live Superset without a browser.
+
+Upstream's single-service-account behaviour is still the default, so existing deployments are unaffected.
+
+## Per-user identity (Google SSO)
+
+### Why
+
+In service mode the server holds one Superset login. Everybody who uses the MCP server gets that account's permissions, and Superset's action log attributes every change to it. In `google-sso` mode the identity chain is:
+
+```
+MCP client  --OAuth 2.1-->  this server  --redirect-->  Google (hd=<your domain>)
+                                 |  <- access token, verified e-mail
+                                 v
+                    e-mail  ->  Superset user (looked up by e-mail)
+                                 |
+                                 v
+             Superset API token minted for that user id  ->  every /api/v1 call
+```
+
+Superset users provisioned through SSO have no password usable with `POST /api/v1/security/login`, so the server mints the same Flask-JWT-Extended access token Superset itself issues: HS256, `sub` = the user's id, signed with Superset's `SECRET_KEY` (`JWT_SECRET_KEY`). Superset then applies that user's own permissions — no permission logic is duplicated in the MCP server.
+
+### Configuration
+
+```bash
+SUPERSET_MCP_AUTH_MODE=google-sso
+
+# Public HTTPS URL of this server (OAuth metadata and the Google redirect live under it)
+SUPERSET_MCP_PUBLIC_URL=https://mcp.example.com
+
+# Google OAuth client (Web application)
+GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-...
+
+# Superset's SECRET_KEY / JWT_SECRET_KEY
+SUPERSET_JWT_SECRET=...
+
+# Only these e-mail domains may use the server (also restricts Google's account chooser)
+SUPERSET_MCP_ALLOWED_DOMAINS=example.com
+
+# Service account, used only to look up the Superset user behind an e-mail (needs Admin)
+SUPERSET_BASE_URL=http://superset:8088
+SUPERSET_USERNAME=mcp_service
+SUPERSET_PASSWORD=...
+```
+
+Optional: `SUPERSET_MCP_TOKEN_TTL` (minted token lifetime, default 600s), `GOOGLE_HOSTED_DOMAIN`, `SUPERSET_JWT_ALGORITHM`, `SUPERSET_MCP_AUTO_CREATE_USERS` + `SUPERSET_MCP_DEFAULT_ROLE`.
+
+Auto-creation is off by default: Flask-AppBuilder derives usernames from the OAuth provider, so an account pre-created here under a different username can collide with the SSO login on the unique e-mail column. Let users sign in to Superset once instead — the SSO login creates the account, and the server finds it by e-mail.
+
+### Google Cloud setup
+
+In the OAuth client (Web application) add as an authorized redirect URI:
+
+```
+https://<SUPERSET_MCP_PUBLIC_URL>/auth/callback
+```
+
+The same client can serve Superset's own UI login (`https://<superset-host>/oauth-authorized/google`).
+
+### Verifying
+
+```bash
+# no browser needed: resolves the e-mail, mints that user's token, calls Superset
+mcp-superset-selftest someone@example.com
+
+# what the server reports about itself
+curl https://mcp.example.com/health
+
+# unauthenticated calls are rejected with an OAuth challenge
+curl -i -X POST https://mcp.example.com/mcp
+```
+
+From an MCP client, call `superset_get_current_user`: it returns the Superset account the tools act as.
+
+### Security notes
+
+- The process can act as any Superset user, so treat `SUPERSET_JWT_SECRET` like Superset's own secret: keep it in an env file readable only by the service, and rotate it in both places together.
+- Always terminate TLS in front of the server; Google will only redirect to HTTPS.
+- Keep `SUPERSET_MCP_ALLOWED_DOMAINS` set — without it, any Google account the OAuth client accepts can reach the e-mail lookup.
+- `deploy/` contains the Docker and nginx reference configuration used in production.
 
 ## Comparison with Other Superset MCP Servers
 
@@ -81,16 +156,21 @@ A comprehensive [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 
 ### Installation
 
+This fork is not published to PyPI - install it from git:
+
 ```bash
-# From PyPI
-pip install mcp-superset
+# With pip
+pip install "git+https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git@main"
 
 # With uv (recommended)
-uv pip install mcp-superset
+uv pip install "git+https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git@main"
 
-# Run without installing (uvx)
-uvx mcp-superset
+# From a clone (editable, for development)
+git clone https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git
+cd mcp-superset-sso && uv pip install -e ".[dev]"
 ```
+
+For a containerised deployment see [`deploy/`](deploy/).
 
 ### Configuration
 
@@ -142,11 +222,8 @@ gitignored), not in shell history or committed config.
 ### Running
 
 ```bash
-# Using CLI (after pip install)
+# Using CLI (after install)
 mcp-superset
-
-# Run without installing
-uvx mcp-superset
 
 # Using Python module
 python -m mcp_superset
@@ -191,7 +268,7 @@ Add to your project's `.mcp.json`:
 }
 ```
 
-Then start the server: `mcp-superset` or `uvx mcp-superset`.
+Then start the server: `mcp-superset` (see [Running](#running)).
 
 #### Claude Desktop
 
@@ -529,7 +606,7 @@ FAB_API_MAX_PAGE_SIZE = 100
 ### Setup
 
 ```bash
-git clone https://github.com/bintocher/mcp-superset.git
+git clone https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git
 cd superset-mcp
 
 # Create virtual environment and install in editable mode

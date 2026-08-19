@@ -197,7 +197,7 @@ async def _auto_fix_charts_for_filter(
 def register_dashboard_tools(mcp):
     """Register all dashboard-related MCP tools."""
 
-    from mcp_superset.server import superset_client as client
+    from mcp_superset.context import current_client as client
     from mcp_superset.tools.helpers import auto_sync_dashboard_access
 
     async def _validate_kpi_height(position: dict) -> str | None:

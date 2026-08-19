@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-20
+
+First release of this fork (`mcp-superset-sso`), based on upstream
+[bintocher/mcp-superset](https://github.com/bintocher/mcp-superset) v0.3.1.
+
+### Added
+
+- **Per-user identity via Google SSO** (`SUPERSET_MCP_AUTH_MODE=google-sso`). Callers authenticate with Google (FastMCP's `GoogleProvider`, OAuth 2.1 with dynamic client registration), and each tool call is executed as *their* Superset user instead of a shared service account, so roles, row-level security, ownership and audit-log entries are theirs. The caller's verified e-mail is mapped to a Superset user, and a Flask-JWT-Extended access token identical in layout to the one `/api/v1/security/login` issues is minted for that user id and signed with Superset's `SECRET_KEY` (`SUPERSET_JWT_SECRET`) - the only way to act as an SSO user, who has no API-usable password. New modules: `identity.py` (token minting, user directory, per-user client registry) and `context.py` (resolves the client of the current caller).
+- `SUPERSET_MCP_ALLOWED_DOMAINS` - only these e-mail domains may use the server; a single value also restricts Google's account chooser via `hd`.
+- `SUPERSET_MCP_AUTO_CREATE_USERS` / `SUPERSET_MCP_DEFAULT_ROLE` - opt-in provisioning for callers who have no Superset account yet (off by default; letting Superset's own SSO login create the account avoids username collisions on the unique e-mail column).
+- `superset_get_current_user` - reports the Superset account the tools are acting as, plus whether per-user mode is on.
+- `mcp-superset-selftest <email>` - resolves an e-mail, mints that user's token and calls Superset, so a wrong secret or a missing account is diagnosed without a browser.
+- `description` argument in `superset_chart_create` and `superset_chart_update`.
+- `deploy/` - Dockerfile, compose service block and nginx vhost used for deployment.
+- Tests for token layout, token caching, e-mail lookup (including deactivated and unknown users), the per-user client registry and domain enforcement.
+
+### Changed
+
+- Tool modules now bind `mcp_superset.context.current_client` instead of the module-level `superset_client`, so the acting identity is resolved per call. Service mode behaves exactly as upstream.
+- `/health` reports the active `auth_mode`.
+
 ## [0.3.1] - 2026-07-25
 
 ### Fixed
