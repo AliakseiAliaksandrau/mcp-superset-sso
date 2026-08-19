@@ -53,6 +53,11 @@ ALLOWED_DOMAINS = frozenset(
     d.strip().lower().lstrip("@") for d in os.getenv("SUPERSET_MCP_ALLOWED_DOMAINS", "").split(",") if d.strip()
 )
 TOKEN_TTL = int(os.getenv("SUPERSET_MCP_TOKEN_TTL", "600"))
+# CIMD lets a client use a URL as its client_id, which this server must fetch from
+# the client's own host. Turn it off where that host is unreachable from the server
+# (or when a client's CIMD document is rejected): clients then fall back to dynamic
+# client registration, which needs no outbound call.
+ENABLE_CIMD = _flag("SUPERSET_MCP_ENABLE_CIMD", True)
 AUTO_CREATE_USERS = _flag("SUPERSET_MCP_AUTO_CREATE_USERS", False)
 DEFAULT_ROLE = os.getenv("SUPERSET_MCP_DEFAULT_ROLE", "Gamma")
 
@@ -112,6 +117,7 @@ if AUTH_MODE == "google-sso":
         base_url=PUBLIC_URL,
         required_scopes=["openid", "email", "profile"],
         extra_authorize_params=extra_authorize_params or None,
+        enable_cimd=ENABLE_CIMD,
     )
 
     user_registry = UserClientRegistry(
@@ -166,11 +172,12 @@ async def health_check(request: Request) -> JSONResponse:
 
 
 logger.info(
-    "mcp-superset %s starting: superset=%s auth_mode=%s allowed_domains=%s",
+    "mcp-superset %s starting: superset=%s auth_mode=%s allowed_domains=%s cimd=%s",
     __version__,
     SUPERSET_BASE_URL,
     AUTH_MODE,
     ",".join(sorted(ALLOWED_DOMAINS)) or "*",
+    ENABLE_CIMD,
 )
 
 
