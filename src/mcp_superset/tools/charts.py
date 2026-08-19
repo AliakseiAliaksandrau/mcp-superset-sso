@@ -352,6 +352,7 @@ def register_chart_tools(mcp):
         viz_type: str,
         datasource_id: int,
         datasource_type: str = "table",
+        description: str | None = None,
         params: str | None = None,
         query_context: str | None = None,
         dashboards: IntList | None = None,
@@ -405,6 +406,7 @@ def register_chart_tools(mcp):
                   dual_line -> mixed_timeseries, line_multi -> mixed_timeseries
             datasource_id: Dataset ID (from superset_dataset_list).
             datasource_type: Data source type (default "table" — dataset).
+            description: Description (free text shown in the chart metadata).
             params: JSON string with visualization parameters (depend on viz_type).
                 Define metrics, groupings, filters, colors, labels, etc.
 
@@ -479,6 +481,8 @@ def register_chart_tools(mcp):
             "datasource_id": datasource_id,
             "datasource_type": datasource_type,
         }
+        if description is not None:
+            payload["description"] = description
         if params is not None:
             payload["params"] = params
         if query_context is not None:
@@ -501,6 +505,7 @@ def register_chart_tools(mcp):
     async def superset_chart_update(
         chart_id: int,
         slice_name: str | None = None,
+        description: str | None = None,
         viz_type: str | None = None,
         params: str | None = None,
         query_context: str | None = None,
@@ -512,6 +517,7 @@ def register_chart_tools(mcp):
         Args:
             chart_id: ID of the chart to update.
             slice_name: New name.
+            description: New description (free text shown in the chart metadata).
             viz_type: New visualization type (see chart_create for the list of types).
             params: New JSON visualization parameters (replaces entirely).
                 See chart_create for reference on numeric/time formats.
@@ -551,6 +557,8 @@ def register_chart_tools(mcp):
         payload = {}
         if slice_name is not None:
             payload["slice_name"] = slice_name
+        if description is not None:
+            payload["description"] = description
         if viz_type is not None:
             payload["viz_type"] = viz_type
         if params is not None:
