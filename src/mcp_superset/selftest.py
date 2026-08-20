@@ -10,6 +10,11 @@ Superset's secret key changes:
 Prints the identity Superset reports back and what that user can see, so a
 mismatch (wrong secret, wrong user, inactive account) shows up immediately. No
 token or secret is ever printed.
+
+A tightly restricted role is a normal outcome, not a failure: 401 means Superset
+rejected the token, while 403 means it accepted it and then applied that user's
+permissions - which is exactly what this server is for. The two are reported
+differently.
 """
 
 import argparse
@@ -23,6 +28,29 @@ from dotenv import load_dotenv
 from mcp_superset.auth import build_auth_strategy
 from mcp_superset.client import SupersetAPIError, SupersetClient
 from mcp_superset.identity import SupersetIdentityError, UserClientRegistry, UserDirectory
+
+VISIBILITY_ENDPOINTS = (
+    ("dashboards", "/api/v1/dashboard/"),
+    ("charts", "/api/v1/chart/"),
+    ("datasets", "/api/v1/dataset/"),
+)
+
+
+async def _probe(client: SupersetClient, endpoint: str, params: dict | None = None) -> tuple[dict | None, int | None]:
+    """Call an endpoint as the client's user.
+
+    Args:
+        client: Client to call with.
+        endpoint: API endpoint path.
+        params: Optional query parameters.
+
+    Returns:
+        (payload, None) on success, or (None, status_code) when Superset refused.
+    """
+    try:
+        return await client.get(endpoint, params=params), None
+    except SupersetAPIError as exc:
+        return None, exc.status_code
 
 
 async def run(email: str) -> int:
@@ -59,29 +87,54 @@ async def run(email: str) -> int:
     )
 
     try:
-        print(f"Superset      : {base_url}")
-        service_me = await service_client.get("/api/v1/me/")
-        print(f"service account: {_describe(service_me)}")
+        print(f"Superset       : {base_url}")
+        service_me, _ = await _probe(service_client, "/api/v1/me/")
+        print(f"service account: {_describe(service_me) if service_me else 'unavailable'}")
 
         user_client, user = await registry.client_for(email)
-        print(f"resolved      : {email} -> id={user.id} username={user.username}")
+        print(f"resolved       : {email} -> id={user.id} username={user.username}")
 
-        me = await user_client.get("/api/v1/me/")
-        print(f"acting as     : {_describe(me)}")
+        statuses: list[int] = []
+        me, me_status = await _probe(user_client, "/api/v1/me/")
+        if me is not None:
+            print(f"acting as      : {_describe(me)}")
+        else:
+            if me_status is not None:
+                statuses.append(me_status)
+            print(
+                f"acting as      : Superset did not return the profile ({me_status}) - "
+                "expected for a minimal role without read access to /api/v1/me/"
+            )
 
-        for label, endpoint in (
-            ("dashboards", "/api/v1/dashboard/"),
-            ("charts", "/api/v1/chart/"),
-            ("datasets", "/api/v1/dataset/"),
-        ):
-            visible = await user_client.get(endpoint, params={"q": "(page_size:1)"})
-            print(f"visible {label:<11}: {visible.get('count')}")
+        for label, endpoint in VISIBILITY_ENDPOINTS:
+            data, status = await _probe(user_client, endpoint, {"q": "(page_size:1)"})
+            if data is not None:
+                print(f"visible {label:<8}: {data.get('count')}")
+            else:
+                if status is not None:
+                    statuses.append(status)
+                reason = "no permission" if status == 403 else "refused"
+                print(f"visible {label:<8}: {reason} ({status})")
 
-        reported = (me.get("result") or {}).get("email") or ""
-        if reported.strip().lower() != email.strip().lower():
-            print(f"MISMATCH: Superset reports {reported!r} for a token minted for {email!r}.")
+        if 401 in statuses:
+            print(
+                "FAILED: Superset rejected the minted token (401). Check that "
+                "SUPERSET_JWT_SECRET matches Superset's SECRET_KEY."
+            )
             return 1
-        print("OK: Superset executes requests as this user.")
+
+        if me is not None:
+            reported = (me.get("result") or {}).get("email") or ""
+            if reported.strip().lower() != email.strip().lower():
+                print(f"MISMATCH: Superset reports {reported!r} for a token minted for {email!r}.")
+                return 1
+            print("OK: Superset executes requests as this user.")
+            return 0
+
+        print(
+            "OK: the token was accepted (403 means authenticated but not authorised), "
+            "so requests run with this user's own - here very limited - permissions."
+        )
         return 0
     except (SupersetIdentityError, SupersetAPIError) as exc:
         print(f"FAILED: {exc}")
