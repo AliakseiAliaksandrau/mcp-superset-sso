@@ -62,12 +62,12 @@ async def test_directory_finds_user_by_email():
             200,
             json={
                 "count": 1,
-                "result": [{"id": 7, "username": "google_123", "email": "Someone@Hauswell.eu", "active": True}],
+                "result": [{"id": 7, "username": "google_123", "email": "Someone@Example.com", "active": True}],
             },
         )
     )
     directory = UserDirectory(service_client=_service_client())
-    user = await directory.resolve("someone@hauswell.eu")
+    user = await directory.resolve("someone@example.com")
     assert (user.id, user.username) == (7, "google_123")
 
 
@@ -76,7 +76,7 @@ async def test_directory_rejects_unknown_email_with_actionable_message():
     respx.get(f"{BASE}/api/v1/security/users/").mock(return_value=httpx.Response(200, json={"count": 0, "result": []}))
     directory = UserDirectory(service_client=_service_client())
     with pytest.raises(SupersetIdentityError, match="Sign in to Superset once"):
-        await directory.resolve("nobody@hauswell.eu")
+        await directory.resolve("nobody@example.com")
 
 
 @respx.mock
@@ -86,13 +86,13 @@ async def test_directory_rejects_deactivated_user():
             200,
             json={
                 "count": 1,
-                "result": [{"id": 9, "username": "old", "email": "old@hauswell.eu", "active": False}],
+                "result": [{"id": 9, "username": "old", "email": "old@example.com", "active": False}],
             },
         )
     )
     directory = UserDirectory(service_client=_service_client())
     with pytest.raises(SupersetIdentityError, match="deactivated"):
-        await directory.resolve("old@hauswell.eu")
+        await directory.resolve("old@example.com")
 
 
 @respx.mock
@@ -102,7 +102,7 @@ async def test_registry_returns_one_client_per_user_and_mints_their_token():
             200,
             json={
                 "count": 1,
-                "result": [{"id": 11, "username": "u", "email": "u@hauswell.eu", "active": True}],
+                "result": [{"id": 11, "username": "u", "email": "u@example.com", "active": True}],
             },
         )
     )
@@ -113,8 +113,8 @@ async def test_registry_returns_one_client_per_user_and_mints_their_token():
         jwt_secret=SECRET,
         directory=UserDirectory(service_client=_service_client()),
     )
-    client, user = await registry.client_for("u@hauswell.eu")
-    again, _ = await registry.client_for("U@Hauswell.eu")
+    client, user = await registry.client_for("u@example.com")
+    again, _ = await registry.client_for("U@Example.com")
     assert client is again  # same user -> same cached client
     assert user.id == 11
 
@@ -137,9 +137,9 @@ class _FakeToken:
 
 
 def test_caller_email_enforces_allowed_domains(monkeypatch):
-    context.configure(service_client=_service_client(), allowed_domains={"hauswell.eu"})
-    monkeypatch.setattr(context, "get_access_token", lambda: _FakeToken("me@hauswell.eu"))
-    assert context.caller_email() == "me@hauswell.eu"
+    context.configure(service_client=_service_client(), allowed_domains={"example.com"})
+    monkeypatch.setattr(context, "get_access_token", lambda: _FakeToken("me@example.com"))
+    assert context.caller_email() == "me@example.com"
 
     monkeypatch.setattr(context, "get_access_token", lambda: _FakeToken("me@gmail.com"))
     with pytest.raises(SupersetIdentityError, match="not allowed"):
