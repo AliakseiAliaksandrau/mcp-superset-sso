@@ -62,13 +62,14 @@ def main():
     if args.env_file:
         os.environ["SUPERSET_MCP_ENV_FILE"] = args.env_file
 
-    from mcp_superset.server import mcp
+    from mcp_superset.server import HTTP_MIDDLEWARE, mcp
 
     kwargs = {"transport": args.transport}
     if args.transport != "stdio":
         kwargs["host"] = args.host
         kwargs["port"] = args.port
         kwargs["stateless_http"] = True
+        kwargs["middleware"] = HTTP_MIDDLEWARE
 
     mcp.run(**kwargs)
 

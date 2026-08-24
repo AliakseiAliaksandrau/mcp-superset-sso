@@ -13,6 +13,7 @@ from mcp_superset import __version__, context
 from mcp_superset.auth import build_auth_strategy
 from mcp_superset.client import SupersetClient
 from mcp_superset.identity import UserClientRegistry, UserDirectory
+from mcp_superset.protocol_compat import compat_middleware
 from mcp_superset.tools import register_all_tools
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,8 @@ ENABLE_CIMD = _flag("SUPERSET_MCP_ENABLE_CIMD", True)
 # so every restart invalidates the registrations clients hold and each user has to
 # authorize again; a directory on a volume survives restarts.
 CLIENT_STORE_DIR = os.getenv("SUPERSET_MCP_CLIENT_STORE_DIR", "").strip()
+# Accept MCP revisions newer than the bundled SDK knows (see protocol_compat).
+PROTOCOL_COMPAT = _flag("SUPERSET_MCP_PROTOCOL_COMPAT", True)
 AUTO_CREATE_USERS = _flag("SUPERSET_MCP_AUTO_CREATE_USERS", False)
 DEFAULT_ROLE = os.getenv("SUPERSET_MCP_DEFAULT_ROLE", "Gamma")
 
@@ -203,7 +206,16 @@ logger.info(
 )
 
 
+HTTP_MIDDLEWARE = compat_middleware(PROTOCOL_COMPAT)
+
+
 if __name__ == "__main__":
     host = os.getenv("SUPERSET_MCP_HOST", "127.0.0.1")
     port = int(os.getenv("SUPERSET_MCP_PORT", "8001"))
-    mcp.run(transport="streamable-http", host=host, port=port, stateless_http=True)
+    mcp.run(
+        transport="streamable-http",
+        host=host,
+        port=port,
+        stateless_http=True,
+        middleware=HTTP_MIDDLEWARE,
+    )
