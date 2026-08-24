@@ -8,6 +8,7 @@ from mcp_superset.protocol_compat import (
     PROTOCOL_VERSION_HEADER,
     ProtocolVersionCompatMiddleware,
     compat_middleware,
+    sdk_known_methods,
 )
 
 BODY = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
@@ -105,3 +106,77 @@ async def test_non_http_scope_is_passed_through():
 def test_middleware_can_be_disabled():
     assert compat_middleware(enabled=False) == []
     assert len(compat_middleware(enabled=True)) == 1
+
+
+class _Sink:
+    """Collects the ASGI response messages the middleware sends itself."""
+
+    def __init__(self):
+        self.status: int | None = None
+        self.body = b""
+
+    async def __call__(self, message):
+        if message["type"] == "http.response.start":
+            self.status = message["status"]
+        elif message["type"] == "http.response.body":
+            self.body += message.get("body", b"")
+
+
+async def _call(body: bytes, version: str | None = None) -> tuple[_Recorder, _Sink]:
+    app, sink = _Recorder(), _Sink()
+    middleware = ProtocolVersionCompatMiddleware(app)
+    await middleware(_scope(version), _receive([body]), sink)
+    return app, sink
+
+
+def test_sdk_method_list_is_readable():
+    """The refusal below is only safe while this reflects the SDK's own union."""
+    methods = sdk_known_methods()
+    assert {"initialize", "tools/call", "tools/list"} <= methods
+    assert "server/discover" not in methods
+
+
+async def test_unknown_method_gets_method_not_found():
+    """server/discover - the probe that cut the connector off - must say -32601."""
+    body = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "server/discover"}).encode()
+    app, sink = await _call(body, "2026-07-28")
+
+    assert sink.status == 200
+    answer = json.loads(sink.body)
+    assert answer["id"] == 7
+    assert answer["error"]["code"] == -32601
+    assert "server/discover" in answer["error"]["message"]
+    assert app.body == b""  # never reached the SDK
+
+
+async def test_unknown_notification_is_acknowledged_without_a_body():
+    body = json.dumps({"jsonrpc": "2.0", "method": "notifications/whatever"}).encode()
+    app, sink = await _call(body)
+
+    assert sink.status == 202
+    assert sink.body == b""
+    assert app.body == b""
+
+
+async def test_known_method_still_reaches_the_sdk():
+    app, sink = await _call(BODY)
+    assert sink.status is None
+    assert app.body == BODY
+
+
+async def test_non_jsonrpc_body_reaches_the_sdk():
+    """A token form post must not be mistaken for a JSON-RPC call."""
+    app, sink = await _call(b"grant_type=refresh_token&refresh_token=x")
+    assert sink.status is None
+    assert app.body
+
+
+async def test_refusal_is_disabled_when_the_method_list_is_unavailable():
+    """Introspection failure must not turn into wrongly refusing valid methods."""
+    app, sink = _Recorder(), _Sink()
+    middleware = ProtocolVersionCompatMiddleware(app, known_methods=frozenset())
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "server/discover"}).encode()
+    await middleware(_scope(None), _receive([body]), sink)
+
+    assert sink.status is None
+    assert app.body == body
