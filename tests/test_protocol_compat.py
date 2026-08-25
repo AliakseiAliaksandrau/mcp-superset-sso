@@ -1,10 +1,11 @@
-"""Tests for refusing unsupported revisions and unknown methods per the MCP spec."""
+"""Tests for answering the modern discovery probe without posing as a modern server."""
 
 import json
 
 from mcp.types import LATEST_PROTOCOL_VERSION
 
 from mcp_superset.protocol_compat import (
+    DISCOVER_METHOD,
     PROTOCOL_VERSION_HEADER,
     PROTOCOL_VERSION_META_KEY,
     ProtocolCompatMiddleware,
@@ -15,7 +16,8 @@ from mcp_superset.protocol_compat import (
 # The revision Claude asks for, and the probe it sends before anything else.
 MODERN = "2026-07-28"
 BODY = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
-DISCOVER = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "server/discover"}).encode()
+DISCOVER = json.dumps({"jsonrpc": "2.0", "id": 7, "method": DISCOVER_METHOD}).encode()
+UNKNOWN = json.dumps({"jsonrpc": "2.0", "id": 8, "method": "tasks/whatever"}).encode()
 
 
 class _Recorder:
@@ -80,34 +82,48 @@ async def _call(body: bytes = BODY, version: str | None = None, **kwargs):
     return app, sink
 
 
-async def test_unsupported_version_gets_400_and_the_supported_list():
-    """The refusal the client needs to retry: 400 + -32022 naming our versions."""
-    app, sink = await _call(BODY, MODERN)
+async def test_discovery_probe_is_answered_with_the_versions_we_speak():
+    """The probe that took the connector down: answer it, do not refuse it."""
+    app, sink = await _call(DISCOVER, MODERN, server_info={"name": "superset", "version": "0.4.0"})
 
-    assert sink.status == 400
-    error = sink.json["error"]
-    assert error["code"] == -32022
-    assert sink.json["id"] == 1
-    assert error["data"]["requested"] == MODERN
-    assert LATEST_PROTOCOL_VERSION in error["data"]["supported"]
+    assert sink.status == 200
+    result = sink.json["result"]
+    assert sink.json["id"] == 7
+    assert result["resultType"] == "complete"
+    assert LATEST_PROTOCOL_VERSION in result["supportedVersions"]
+    assert MODERN not in result["supportedVersions"]
+    assert result["capabilities"] == {"tools": {}}
+    assert result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "superset"
     assert not app.called
 
 
-async def test_version_is_also_read_from_the_request_body():
-    """Revision 2026-07-28 carries it in _meta as well as the header."""
+async def test_probe_is_answered_even_without_a_version_header():
+    """The revision carries the version in _meta as well as the header."""
     body = json.dumps(
         {
             "jsonrpc": "2.0",
             "id": 3,
-            "method": "tools/list",
+            "method": DISCOVER_METHOD,
             "params": {"_meta": {PROTOCOL_VERSION_META_KEY: MODERN}},
         }
     ).encode()
     app, sink = await _call(body)
 
-    assert sink.status == 400
-    assert sink.json["error"]["code"] == -32022
+    assert sink.status == 200
+    assert sink.json["result"]["resultType"] == "complete"
     assert not app.called
+
+
+async def test_request_on_an_unsupported_revision_is_left_to_the_sdk():
+    """Its plain 400 is what makes a dual-era client fall back to initialize.
+
+    Answering a recognized modern error here instead (e.g. -32022) marks this
+    server as modern, and the client then loops on the modern probe - observed
+    live as six identical probes and a failed connection.
+    """
+    app, sink = await _call(BODY, MODERN)
+    assert sink.status is None
+    assert app.body == BODY
 
 
 async def test_supported_version_reaches_the_sdk():
@@ -124,21 +140,14 @@ async def test_request_without_a_version_reaches_the_sdk():
 
 
 async def test_unknown_method_gets_404_and_method_not_found():
-    """server/discover on a supported version: 404 + -32601, as the spec requires."""
-    app, sink = await _call(DISCOVER, LATEST_PROTOCOL_VERSION)
+    """Any other method the SDK cannot parse: 404 + -32601, as the spec requires."""
+    app, sink = await _call(UNKNOWN, LATEST_PROTOCOL_VERSION)
 
     assert sink.status == 404
-    assert sink.json["id"] == 7
+    assert sink.json["id"] == 8
     assert sink.json["error"]["code"] == -32601
-    assert "server/discover" in sink.json["error"]["message"]
+    assert "tasks/whatever" in sink.json["error"]["message"]
     assert not app.called
-
-
-async def test_version_refusal_takes_precedence_over_the_method():
-    """A modern probe is refused on the version, which is what the client retries on."""
-    _app, sink = await _call(DISCOVER, MODERN)
-    assert sink.status == 400
-    assert sink.json["error"]["code"] == -32022
 
 
 async def test_notification_refusal_carries_no_id():
@@ -193,18 +202,21 @@ async def test_non_http_scope_is_passed_through():
 
 async def test_method_refusal_is_disabled_when_the_method_list_is_unavailable():
     """Introspection failure must not turn into wrongly refusing valid methods."""
-    app, sink = await _call(DISCOVER, LATEST_PROTOCOL_VERSION, known_methods=frozenset())
+    app, sink = await _call(UNKNOWN, LATEST_PROTOCOL_VERSION, known_methods=frozenset())
     assert sink.status is None
-    assert app.body == DISCOVER
+    assert app.body == UNKNOWN
 
 
 def test_sdk_method_list_is_readable():
     """The method refusal is only safe while this reflects the SDK's own union."""
     methods = sdk_known_methods()
     assert {"initialize", "tools/call", "tools/list"} <= methods
-    assert "server/discover" not in methods
+    assert DISCOVER_METHOD not in methods
 
 
 def test_middleware_can_be_disabled():
     assert compat_middleware(enabled=False) == []
-    assert len(compat_middleware(enabled=True)) == 1
+
+    stack = compat_middleware(enabled=True, server_info={"name": "superset", "version": "1"})
+    assert len(stack) == 1
+    assert stack[0].kwargs["server_info"]["name"] == "superset"

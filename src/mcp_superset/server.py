@@ -206,7 +206,11 @@ logger.info(
 )
 
 
-HTTP_MIDDLEWARE = compat_middleware(PROTOCOL_COMPAT)
+HTTP_MIDDLEWARE = compat_middleware(
+    PROTOCOL_COMPAT,
+    server_info={"name": "superset", "version": __version__},
+    capabilities={"tools": {}},
+)
 
 
 if __name__ == "__main__":

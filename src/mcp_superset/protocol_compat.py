@@ -1,30 +1,31 @@
-"""Answer a modern MCP client in the terms its revision defines.
+"""Answer a modern MCP client without pretending to be one.
 
 Clients now speak revision ``2026-07-28``, which dropped the ``initialize``
-handshake: the protocol version travels in every request (header
-``MCP-Protocol-Version`` plus ``_meta``), and a client probes ``server/discover``
-before anything else. The bundled SDK speaks up to ``2025-11-25`` and cannot be
-upgraded away from it - fastmcp 3.4.x pins ``mcp<2.0`` while the newer revisions
-only exist in ``mcp`` 2.x.
+handshake and probes ``server/discover`` before anything else. The bundled SDK
+speaks up to ``2025-11-25`` and cannot be upgraded away from it - fastmcp 3.4.x
+pins ``mcp<2.0`` while the newer revisions only exist in ``mcp`` 2.x.
 
-That revision states exactly how a server refuses what it does not implement,
-and the answers are what a client uses to decide whether to retry or to fall back
-to the legacy handshake:
+The probe is answered here, truthfully: a ``DiscoverResult`` whose
+``supportedVersions`` lists only the revisions this build actually speaks. The
+spec says of that field, "The client should choose one of these for subsequent
+requests", so one round trip is enough for the client to settle on ``2025-11-25``
+and use the legacy handshake.
 
-* unsupported protocol version -> ``400 Bad Request`` with ``-32022``
-  ``UnsupportedProtocolVersionError`` carrying ``data.supported`` (the versions
-  this server does speak) and ``data.requested``. The client then "SHOULD select a
-  mutually supported version from the supported list and retry the request";
-* unknown method -> ``404 Not Found`` with ``-32601`` ``Method not found``.
+What must *not* happen is answering with a modern protocol error such as
+``-32022 UnsupportedProtocolVersionError``. Those codes identify a *modern*
+server, and the compatibility matrix then has the client "retry with a supported
+version rather than falling back" - which it does by re-sending the modern
+``server/discover`` it just failed on. Observed live: six identical probes and
+then "the server didn't respond". A legacy server has to look legacy, so a
+request on an unsupported revision is left to the SDK, whose plain ``400`` is not
+a recognized modern error and therefore triggers the client's fallback to
+``initialize``.
 
-The SDK produces neither: it answers a plain ``400`` for the version and lets its
-validator emit ``-32602 Invalid request parameters`` for the method. Both leave the
-client guessing - in practice it sometimes fell back to ``initialize`` and
-sometimes declared the server unreachable, which is what took the connector down
-twice. This middleware supplies the two documented answers before the SDK sees the
-request, so the outcome is deterministic.
+Anything else the SDK cannot parse gets ``404`` + ``-32601 Method not found``,
+the answer the revision defines for an unknown method.
 
-Spec: https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning
+Spec: https://modelcontextprotocol.io/specification/2026-07-28/server/discover
+      https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning
       https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
 
 Turn it off with ``SUPERSET_MCP_PROTOCOL_COMPAT=false`` once the SDK speaks the
@@ -50,8 +51,10 @@ PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
 # Only the head of a body is parsed; the whole body is replayed downstream untouched.
 _BODY_PEEK_LIMIT = 8192
 
-# Error codes defined by the MCP specification for these two refusals.
-_UNSUPPORTED_PROTOCOL_VERSION = -32022
+# The modern discovery probe, which every 2026-07-28 client sends first.
+DISCOVER_METHOD = "server/discover"
+
+# The answer the revision defines for a method a server does not implement.
 _METHOD_NOT_FOUND = -32601
 
 
@@ -83,11 +86,11 @@ def sdk_known_methods() -> frozenset[str]:
 
 
 class ProtocolCompatMiddleware:
-    """Refuse unsupported versions and unknown methods the way the spec prescribes.
+    """Answer the modern discovery probe; leave everything else to the SDK.
 
-    Anything the SDK can handle is passed through untouched. Every POST is named
-    in the log (method plus requested revision), because the SDK logs a method
-    only when its validation fails, which makes an incident unreadable.
+    Every POST is named in the log (method plus requested revision), because the
+    SDK logs a method only when its validation fails, which makes an incident
+    unreadable afterwards.
     """
 
     def __init__(
@@ -95,17 +98,22 @@ class ProtocolCompatMiddleware:
         app: ASGIApp,
         supported: tuple[str, ...] | None = None,
         known_methods: frozenset[str] | None = None,
+        server_info: dict[str, Any] | None = None,
+        capabilities: dict[str, Any] | None = None,
+        instructions: str | None = None,
         log_requests: bool = True,
     ):
         self.app = app
         self.supported = supported or tuple(sorted(SUPPORTED_PROTOCOL_VERSIONS, reverse=True))
         self.known_methods = sdk_known_methods() if known_methods is None else known_methods
+        self.server_info = server_info
+        self.capabilities = capabilities if capabilities is not None else {"tools": {}}
+        self.instructions = instructions
         self.log_requests = log_requests
-        self._reported_versions: set[str] = set()
         self._reported_methods: set[str] = set()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Answer what the SDK cannot, and hand everything else on."""
+        """Answer the discovery probe and unknown methods; pass the rest through."""
         if scope["type"] != "http" or scope.get("method") != "POST":
             await self.app(scope, receive, send)
             return
@@ -121,14 +129,17 @@ class ProtocolCompatMiddleware:
                 requested or "(none)",
             )
 
-        if requested is not None and requested not in self.supported:
-            await self._refuse_version(requested, call, scope, receive, send)
+        if call.is_jsonrpc and call.method == DISCOVER_METHOD:
+            await self._answer_discover(call, scope, receive, send)
             return
 
         if self._is_unknown_method(call):
             await self._refuse_method(call, scope, receive, send)
             return
 
+        # A request on a revision the SDK does not speak is left to the SDK: its
+        # plain 400 is not a recognized modern error, which is exactly the signal
+        # that makes a dual-era client fall back to the initialize handshake.
         await self.app(scope, receive, send)
 
     def _is_unknown_method(self, call: "_JsonRpcCall") -> bool:
@@ -137,27 +148,26 @@ class ProtocolCompatMiddleware:
             return False
         return call.method not in self.known_methods
 
-    async def _refuse_version(
-        self, requested: str, call: "_JsonRpcCall", scope: Scope, receive: Receive, send: Send
-    ) -> None:
-        """Answer 400 + -32022, naming the versions this server does speak."""
-        if requested not in self._reported_versions:
-            self._reported_versions.add(requested)
-            logger.info(
-                "Client asked for MCP protocol %s; answering -32022 with supported=%s",
-                requested,
-                ",".join(self.supported),
-            )
-        await _json_rpc_error(
-            status=400,
-            code=_UNSUPPORTED_PROTOCOL_VERSION,
-            message="Unsupported protocol version",
-            request_id=call.id,
-            data={"supported": list(self.supported), "requested": requested},
-            scope=scope,
-            receive=receive,
-            send=send,
+    async def _answer_discover(self, call: "_JsonRpcCall", scope: Scope, receive: Receive, send: Send) -> None:
+        """Reply with a DiscoverResult naming the revisions this build speaks."""
+        logger.info(
+            "Discovery probe answered: supportedVersions=%s",
+            ",".join(self.supported),
         )
+        result: dict[str, Any] = {
+            "resultType": "complete",
+            "supportedVersions": list(self.supported),
+            "capabilities": self.capabilities,
+        }
+        if self.instructions:
+            result["instructions"] = self.instructions
+        if self.server_info:
+            result["_meta"] = {"io.modelcontextprotocol/serverInfo": self.server_info}
+
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "result": result}
+        if call.id is not None:
+            payload["id"] = call.id
+        await JSONResponse(payload)(scope, receive, send)
 
     async def _refuse_method(self, call: "_JsonRpcCall", scope: Scope, receive: Receive, send: Send) -> None:
         """Answer 404 + -32601 for a method this build does not implement."""
@@ -276,15 +286,30 @@ def _peek_call(body: bytes) -> _JsonRpcCall:
     )
 
 
-def compat_middleware(enabled: bool = True) -> list[Middleware]:
+def compat_middleware(
+    enabled: bool = True,
+    server_info: dict[str, Any] | None = None,
+    capabilities: dict[str, Any] | None = None,
+    instructions: str | None = None,
+) -> list[Middleware]:
     """Return the HTTP middleware stack for the server.
 
     Args:
         enabled: False returns an empty stack, restoring plain SDK behaviour.
+        server_info: Name and version reported in the discovery result.
+        capabilities: Capabilities reported in the discovery result.
+        instructions: Optional guidance included in the discovery result.
 
     Returns:
         A list to pass as ``middleware=`` to FastMCP's HTTP app.
     """
     if not enabled:
         return []
-    return [Middleware(ProtocolCompatMiddleware)]
+    return [
+        Middleware(
+            ProtocolCompatMiddleware,
+            server_info=server_info,
+            capabilities=capabilities,
+            instructions=instructions,
+        )
+    ]
