@@ -197,6 +197,13 @@ def test_remap_chart_ids_rewrites_filters_and_cross_filters():
     assert changed == 9
 
 
+_ORIGINAL_CSS = (
+    "#chart-id-889 .pvtTable td{color:red}\n"
+    ".dashboard-chart-id-934 .x{overflow:visible}\n"
+    "#chart-id-8890 .pvtTable td{color:blue}\n"  # another chart whose id merely starts with 889
+)
+
+
 @respx.mock
 async def test_dashboard_copy_with_charts_leaves_the_original_alone(mcp_server):
     _csrf()
@@ -208,13 +215,14 @@ async def test_dashboard_copy_with_charts_leaves_the_original_alone(mcp_server):
                     "id": 155,
                     "position_json": json.dumps(_ORIGINAL_POSITIONS),
                     "json_metadata": json.dumps(_ORIGINAL_METADATA),
-                    "css": ".x{}",
+                    "css": _ORIGINAL_CSS,
                 }
             },
         )
     )
+    # The real Superset 6.1 answer shape: the new id is nested under "result".
     copy = respx.post(f"{BASE}/api/v1/dashboard/155/copy/").mock(
-        return_value=httpx.Response(200, json={"id": 500, "last_modified_time": 1})
+        return_value=httpx.Response(200, json={"result": {"id": 500, "last_modified_time": 1.0}})
     )
     new_positions = json.loads(json.dumps(_ORIGINAL_POSITIONS))
     new_positions["CHART-a"]["meta"]["chartId"] = 2001
@@ -227,6 +235,7 @@ async def test_dashboard_copy_with_charts_leaves_the_original_alone(mcp_server):
                     "id": 500,
                     "position_json": json.dumps(new_positions),
                     "json_metadata": json.dumps(_ORIGINAL_METADATA),
+                    "css": _ORIGINAL_CSS,
                 }
             },
         )
@@ -267,14 +276,21 @@ async def test_dashboard_copy_with_charts_leaves_the_original_alone(mcp_server):
 
     sent = json.loads(copy.calls.last.request.content)
     assert sent["duplicate_slices"] is True
-    assert sent["css"] == ".x{}"
+    assert sent["css"] == _ORIGINAL_CSS
     sent_md = json.loads(sent["json_metadata"])
     assert sent_md["positions"] == _ORIGINAL_POSITIONS
     assert sent_md["color_scheme"] == "supersetColors"
 
-    fixed = json.loads(json.loads(put_copy.calls.last.request.content)["json_metadata"])
+    fix = json.loads(put_copy.calls.last.request.content)
+    fixed = json.loads(fix["json_metadata"])
     assert fixed["native_filter_configuration"][0]["chartsInScope"] == [2001]
     assert fixed["native_filter_configuration"][0]["scope"]["excluded"] == [2002]
+    assert fix["css"] == (
+        "#chart-id-2001 .pvtTable td{color:red}\n"
+        ".dashboard-chart-id-2002 .x{overflow:visible}\n"
+        "#chart-id-8890 .pvtTable td{color:blue}\n"
+    )
+    assert payload["css_chart_ids_remapped"] == 2
 
     assert json.loads(rename_a.calls.last.request.content) == {"slice_name": "[TEST] РНП WB"}
     assert json.loads(rename_b.calls.last.request.content) == {"slice_name": "[TEST] Сводка WB"}

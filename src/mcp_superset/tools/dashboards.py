@@ -2,6 +2,7 @@
 
 import base64
 import json
+import re
 import uuid
 
 from mcp_superset.tools.helpers import parse_json_arg
@@ -136,6 +137,25 @@ def _remap_chart_ids(metadata: dict, id_map: dict[int, int]) -> int:
     return changed
 
 
+# Dashboard CSS addresses individual charts as #chart-id-N / .dashboard-chart-id-N.
+_CSS_CHART_ID = re.compile(r"chart-id-(\d+)\b")
+
+
+def _remap_css_chart_ids(css: str, id_map: dict[int, int]) -> tuple[str, int]:
+    """Point chart-specific CSS rules at the copied charts. Returns (css, rewritten count)."""
+    changed = 0
+
+    def replace(match: re.Match) -> str:
+        nonlocal changed
+        new_id = id_map.get(int(match.group(1)))
+        if new_id is None:
+            return match.group(0)
+        changed += 1
+        return f"chart-id-{new_id}"
+
+    return _CSS_CHART_ID.sub(replace, css), changed
+
+
 async def _copy_dashboard_with_charts(
     client,
     dashboard_id: int,
@@ -179,7 +199,8 @@ async def _copy_dashboard_with_charts(
     if original.get("css"):
         payload["css"] = original["css"]
     result = await client.post(f"/api/v1/dashboard/{dashboard_id}/copy/", json_data=payload)
-    new_id = result.get("id")
+    # Superset answers {"result": {"id": ..., "last_modified_time": ...}}.
+    new_id = (result.get("result") or {}).get("id") or result.get("id")
     if not new_id:
         return result
 
@@ -196,11 +217,16 @@ async def _copy_dashboard_with_charts(
 
     copy_metadata = _json_object(copy.get("json_metadata"))
     remapped = _remap_chart_ids(copy_metadata, id_map)
+    fix: dict = {}
     if remapped:
-        await client.put(
-            f"/api/v1/dashboard/{new_id}",
-            json_data={"json_metadata": json.dumps(copy_metadata, ensure_ascii=False)},
-        )
+        fix["json_metadata"] = json.dumps(copy_metadata, ensure_ascii=False)
+    css_remapped = 0
+    if copy.get("css"):
+        new_css, css_remapped = _remap_css_chart_ids(copy["css"], id_map)
+        if css_remapped:
+            fix["css"] = new_css
+    if fix:
+        await client.put(f"/api/v1/dashboard/{new_id}", json_data=fix)
 
     renamed = []
     if chart_name_prefix:
@@ -216,6 +242,7 @@ async def _copy_dashboard_with_charts(
         "dashboard_title": dashboard_title,
         "chart_id_map": {str(old): new for old, new in id_map.items()},
         "filter_chart_ids_remapped": remapped,
+        "css_chart_ids_remapped": css_remapped,
         "charts_renamed": renamed,
         "note": (
             "Charts were copied; the original dashboard, its charts, datasets and roles were not changed. "
