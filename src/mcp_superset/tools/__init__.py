@@ -6,6 +6,7 @@ from mcp_superset.tools.dashboards import register_dashboard_tools
 from mcp_superset.tools.databases import register_database_tools
 from mcp_superset.tools.datasets import register_dataset_tools
 from mcp_superset.tools.groups import register_group_tools
+from mcp_superset.tools.mart import mart_database_id, register_mart_tools
 from mcp_superset.tools.queries import register_query_tools
 from mcp_superset.tools.security import register_security_tools
 from mcp_superset.tools.system import register_system_tools
@@ -24,3 +25,6 @@ def register_all_tools(mcp):
     register_system_tools(mcp)
     register_group_tools(mcp)
     register_audit_tools(mcp)
+    # Only where the mart schema and a write-enabled connection for it are set up.
+    if mart_database_id() is not None:
+        register_mart_tools(mcp)

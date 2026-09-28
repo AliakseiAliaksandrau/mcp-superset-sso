@@ -15,6 +15,7 @@ from mcp_superset.client import SupersetClient
 from mcp_superset.identity import UserClientRegistry, UserDirectory
 from mcp_superset.protocol_compat import compat_middleware
 from mcp_superset.tools import register_all_tools
+from mcp_superset.tools.mart import mart_database_id
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,13 @@ mcp = FastMCP(
         + (
             " Every call runs as the signed-in Superset user, so results and permissions are theirs."
             if AUTH_MODE == "google-sso"
+            else ""
+        )
+        + (
+            " Heavy datasets can be served from marts (materialized copies in schema mart, rebuilt"
+            " automatically): call mart_guide before creating, changing or refreshing one, and never"
+            " create or drop them through superset_sqllab_execute."
+            if mart_database_id() is not None
             else ""
         )
     ),
