@@ -157,7 +157,21 @@ async def _run(client, sql: str, *, write: bool, tab: str, wait_seconds: float =
 
 
 def _rows(result: dict) -> list[dict]:
-    return result.get("data") or []
+    """Result rows, with array columns (refresh_on, refresh_at...) as lists.
+
+    SQL Lab renders a PostgreSQL array as a JSON string ('["00:05:00"]').
+    """
+    rows = result.get("data") or []
+    arrays = [c.get("name") for c in result.get("columns") or [] if str(c.get("type") or "").upper().endswith("ARRAY")]
+    for row in rows:
+        for name in arrays:
+            value = row.get(name)
+            if isinstance(value, str):
+                try:
+                    row[name] = json.loads(value)
+                except ValueError:
+                    pass
+    return rows
 
 
 def _outcome(result: dict) -> dict:
@@ -386,7 +400,8 @@ def register_mart_tools(mcp):
             "'sources', (SELECT json_agg(json_build_object('table', s.table_name, 'kind', s.relkind, "
             f"'direct', s.direct) ORDER BY s.table_name) FROM mart._sources s WHERE s.name = {n}), "
             f"'diagnosis', (SELECT mart.diagnose(r.name) FROM mart._registry r WHERE r.name = {n} AND r.status <> 'ok')"
-            ") AS mart"
+            # as text: SQL Lab returns json/jsonb columns as a Python repr ({'a': 1}), not JSON
+            ")::text AS mart"
         )
         rows = _rows(await _read("mart_get", name, sql, "mart: get"))
         info = rows[0]["mart"] if rows else None

@@ -12,7 +12,7 @@ from mcp_superset import context
 from mcp_superset.auth import CookieAuthManager
 from mcp_superset.client import SupersetClient
 from mcp_superset.tools import queries, register_all_tools
-from mcp_superset.tools.mart import _call_script, _dollar_tag, _lit, _text_array
+from mcp_superset.tools.mart import _call_script, _dollar_tag, _lit, _rows, _text_array
 
 BASE = "https://superset.example.com"
 
@@ -255,6 +255,31 @@ async def test_create_from_dataset_applies_the_dataset_sql(mcp_server):
     assert "select 1 as a" in body
     assert "p_source_dataset_id => 42" in body
     assert "p_description => 'From dataset 42 (sales_core)'" in body
+
+
+@respx.mock
+async def test_mart_get_reads_the_object_as_json_text(mcp_server):
+    info = {"registry": {"name": "rnp_sku_day", "version": 2}, "history": [{"version": 2}], "log": None}
+    calls = _mock_sqllab([], log_rows=[{"mart": json.dumps(info)}])
+    async with Client(mcp_server) as c:
+        result = json.loads(_text(await c.call_tool("mart_get", {"name": "rnp_sku_day", "include_sql": False})))
+    # SQL Lab renders a json column as a Python repr; the text cast keeps it parseable
+    assert ")::text AS mart" in calls[0]["sql"]
+    assert "to_jsonb(r) - 'sql'" in calls[0]["sql"]
+    assert result == info
+
+
+def test_rows_turn_array_columns_into_lists():
+    result = {
+        "data": [{"name": "m", "refresh_at": '["00:05:00"]', "refresh_on": "[]", "last_error": "[not json"}],
+        "columns": [
+            {"name": "name", "type": "STRING"},
+            {"name": "refresh_at", "type": "TIMEARRAY"},
+            {"name": "refresh_on", "type": "STRINGARRAY"},
+            {"name": "last_error", "type": "STRING"},
+        ],
+    }
+    assert _rows(result) == [{"name": "m", "refresh_at": ["00:05:00"], "refresh_on": [], "last_error": "[not json"}]
 
 
 @respx.mock
