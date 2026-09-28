@@ -53,6 +53,178 @@ async def _ensure_datasets_filter_ready(client, dashboard_id: int) -> list[dict]
     return updated
 
 
+def _json_object(value) -> dict:
+    """A JSON object field from a Superset response: str, dict or null -> dict."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _remap_chart_ids(metadata: dict, id_map: dict[int, int]) -> int:
+    """Rewrite chart ids in a dashboard's json_metadata using ``id_map`` (old -> new).
+
+    Superset's copy with duplicate_slices remaps chart ids only in the layout and in
+    the legacy filter_scopes / default_filters. Native filters and cross-filters keep
+    the original ids in chartsInScope and scope.excluded, so on the copy a filter
+    that excluded chart 890 would suddenly apply to 890's copy. This fixes those,
+    plus chart_configuration keys, timed_refresh_immune_slices and expanded_slices.
+
+    Returns:
+        How many ids were rewritten.
+    """
+    changed = 0
+
+    def remap_list(values):
+        nonlocal changed
+        if not isinstance(values, list):
+            return values
+        result = []
+        for v in values:
+            new = id_map.get(v) if isinstance(v, int) else None
+            if new is not None:
+                changed += 1
+            result.append(new if new is not None else v)
+        return result
+
+    def remap_scope(holder):
+        if not isinstance(holder, dict):
+            return
+        if "chartsInScope" in holder:
+            holder["chartsInScope"] = remap_list(holder["chartsInScope"])
+        scope = holder.get("scope")
+        if isinstance(scope, dict) and "excluded" in scope:
+            scope["excluded"] = remap_list(scope["excluded"])
+
+    for flt in metadata.get("native_filter_configuration") or []:
+        remap_scope(flt)
+    remap_scope(metadata.get("global_chart_configuration"))
+
+    chart_config = metadata.get("chart_configuration")
+    if isinstance(chart_config, dict):
+        new_config = {}
+        for key, cfg in chart_config.items():
+            old_id = int(key) if str(key).isdigit() else None
+            new_id = id_map.get(old_id) if old_id is not None else None
+            if isinstance(cfg, dict):
+                if isinstance(cfg.get("id"), int) and cfg["id"] in id_map:
+                    cfg["id"] = id_map[cfg["id"]]
+                remap_scope(cfg.get("crossFilters"))
+            if new_id is not None:
+                changed += 1
+            new_config[str(new_id) if new_id is not None else key] = cfg
+        metadata["chart_configuration"] = new_config
+
+    if "timed_refresh_immune_slices" in metadata:
+        metadata["timed_refresh_immune_slices"] = remap_list(metadata["timed_refresh_immune_slices"])
+
+    expanded = metadata.get("expanded_slices")
+    if isinstance(expanded, dict):
+        new_expanded = {}
+        for key, value in expanded.items():
+            new_id = id_map.get(int(key)) if str(key).isdigit() else None
+            if new_id is not None:
+                changed += 1
+            new_expanded[str(new_id) if new_id is not None else key] = value
+        metadata["expanded_slices"] = new_expanded
+
+    return changed
+
+
+async def _copy_dashboard_with_charts(
+    client,
+    dashboard_id: int,
+    dashboard_title: str,
+    json_metadata: str | None,
+    chart_name_prefix: str | None,
+) -> dict:
+    """Copy a dashboard together with new copies of its charts.
+
+    Nothing of the original is modified: its charts, datasets and roles stay as they
+    are. The copies still point to the original datasets until switched with
+    superset_chart_update(datasource_id=...).
+    """
+    caller_metadata = None
+    if json_metadata is not None:
+        caller_metadata, error = parse_json_arg(json_metadata, "json_metadata")
+        if error:
+            return {"error": error}
+    original = (await client.get(f"/api/v1/dashboard/{dashboard_id}")).get("result", {})
+    positions = _json_object(original.get("position_json"))
+    if not positions:
+        return {
+            "error": (
+                f"Dashboard {dashboard_id} has no saved layout (position_json), so its charts "
+                "cannot be copied with it. Open the dashboard in Superset, save it once, and retry."
+            )
+        }
+
+    # The copy endpoint takes the layout ("positions") and the style settings from the
+    # request metadata, as Superset's own "Save as" does; without them the copy loses
+    # its layout and colours.
+    metadata = dict(
+        _json_object(caller_metadata) if json_metadata is not None else _json_object(original.get("json_metadata"))
+    )
+    metadata["positions"] = positions
+    payload = {
+        "dashboard_title": dashboard_title,
+        "json_metadata": json.dumps(metadata, ensure_ascii=False),
+        "duplicate_slices": True,
+    }
+    if original.get("css"):
+        payload["css"] = original["css"]
+    result = await client.post(f"/api/v1/dashboard/{dashboard_id}/copy/", json_data=payload)
+    new_id = result.get("id")
+    if not new_id:
+        return result
+
+    copy = (await client.get(f"/api/v1/dashboard/{new_id}")).get("result", {})
+    new_positions = _json_object(copy.get("position_json"))
+    id_map: dict[int, int] = {}
+    for key, node in positions.items():
+        if not (isinstance(node, dict) and node.get("type") == "CHART"):
+            continue
+        old_chart = (node.get("meta") or {}).get("chartId")
+        new_chart = ((new_positions.get(key) or {}).get("meta") or {}).get("chartId")
+        if old_chart and new_chart:
+            id_map[old_chart] = new_chart
+
+    copy_metadata = _json_object(copy.get("json_metadata"))
+    remapped = _remap_chart_ids(copy_metadata, id_map)
+    if remapped:
+        await client.put(
+            f"/api/v1/dashboard/{new_id}",
+            json_data={"json_metadata": json.dumps(copy_metadata, ensure_ascii=False)},
+        )
+
+    renamed = []
+    if chart_name_prefix:
+        for new_chart in id_map.values():
+            chart = (await client.get(f"/api/v1/chart/{new_chart}")).get("result", {})
+            name = chart.get("slice_name") or ""
+            if not name.startswith(chart_name_prefix):
+                await client.put(f"/api/v1/chart/{new_chart}", json_data={"slice_name": f"{chart_name_prefix}{name}"})
+                renamed.append(new_chart)
+
+    return {
+        "id": new_id,
+        "dashboard_title": dashboard_title,
+        "chart_id_map": {str(old): new for old, new in id_map.items()},
+        "filter_chart_ids_remapped": remapped,
+        "charts_renamed": renamed,
+        "note": (
+            "Charts were copied; the original dashboard, its charts, datasets and roles were not changed. "
+            "The copies still use the original datasets: switch them with "
+            "superset_chart_update(chart_id, datasource_id=...)."
+        ),
+    }
+
+
 async def _auto_fix_charts_for_filter(
     client,
     dashboard_id: int,
@@ -536,15 +708,36 @@ def register_dashboard_tools(mcp):
         dashboard_id: int,
         dashboard_title: str,
         json_metadata: str | None = None,
+        duplicate_charts: bool = False,
+        chart_name_prefix: str | None = None,
     ) -> str:
-        """Create a copy of an existing dashboard with all its charts.
+        """Create a copy of an existing dashboard.
+
+        By default the copy SHARES the original's charts: it is a second dashboard showing
+        the same chart objects, so editing a chart on the copy (its dataset, params, name)
+        changes it on the original dashboard too.
+
+        With duplicate_charts=True every chart is copied as well (new chart ids, bound only
+        to the new dashboard), the layout and the dashboard's filter settings are carried
+        over and re-pointed at the copied charts, and nothing of the original dashboard —
+        its charts, datasets or roles — is modified. Use this for a test / sandbox copy.
 
         Args:
             dashboard_id: ID of the source dashboard to copy.
             dashboard_title: Title for the new copy.
             json_metadata: JSON metadata for the copy.
-                IMPORTANT: Superset requires this field. If not provided, "{}" will be used.
+                IMPORTANT: Superset requires this field. If not provided, "{}" will be used
+                (with duplicate_charts=True the original dashboard's metadata is used instead).
+            duplicate_charts: Also copy the charts (see above). Default False.
+            chart_name_prefix: With duplicate_charts, prepend this to the copied charts'
+                names (e.g. "[TEST] "), so they are told apart from the originals.
         """
+        if duplicate_charts:
+            result = await _copy_dashboard_with_charts(
+                client, dashboard_id, dashboard_title, json_metadata, chart_name_prefix
+            )
+            return json.dumps(result, ensure_ascii=False)
+
         payload = {
             "dashboard_title": dashboard_title,
             "json_metadata": json_metadata or "{}",

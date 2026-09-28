@@ -3,6 +3,7 @@
 import base64
 import json
 import re
+from typing import Any
 
 from mcp_superset.tools.helpers import auto_sync_chart_dashboards, parse_json_arg
 from mcp_superset.tools.types import IntList
@@ -511,6 +512,8 @@ def register_chart_tools(mcp):
         query_context: str | None = None,
         dashboards: IntList | None = None,
         confirm_params_replace: bool = False,
+        datasource_id: int | None = None,
+        datasource_type: str = "table",
     ) -> str:
         """Update an existing chart. Pass only the fields to change.
 
@@ -530,6 +533,14 @@ def register_chart_tools(mcp):
                 otherwise the chart will use the old query context.
             dashboards: New list of dashboard IDs (REPLACES all bindings).
             confirm_params_replace: Confirmation for replacing params (REQUIRED when passing params).
+            datasource_id: Switch the chart to another dataset (the new dataset must have
+                the columns and metrics the chart uses). The dataset reference inside the
+                chart's params and query_context is updated too; everything else is kept,
+                so params need not be passed. A chart is one object wherever it is shown:
+                this changes it on every dashboard it is on (listed in the response).
+                To switch a copy only, copy first (chart_copy or
+                dashboard_copy with duplicate_charts=True).
+            datasource_type: Type of the new datasource (default "table").
         """
         # Guard against partial params replacement
         if params is not None and not confirm_params_replace:
@@ -554,7 +565,7 @@ def register_chart_tools(mcp):
         if qc_error:
             return json.dumps({"error": qc_error}, ensure_ascii=False)
 
-        payload = {}
+        payload: dict[str, Any] = {}
         if slice_name is not None:
             payload["slice_name"] = slice_name
         if description is not None:
@@ -567,7 +578,36 @@ def register_chart_tools(mcp):
             payload["query_context"] = query_context
         if dashboards is not None:
             payload["dashboards"] = dashboards
+
+        datasource_change = None
+        if datasource_id is not None:
+            current = (await client.get(f"/api/v1/chart/{chart_id}")).get("result", {})
+            datasource_ref = f"{datasource_id}__{datasource_type}"
+            chart_params = json.loads(params if params is not None else current.get("params") or "{}")
+            chart_params["datasource"] = datasource_ref
+            payload["params"] = json.dumps(chart_params, ensure_ascii=False)
+            raw_qc = query_context if query_context is not None else current.get("query_context")
+            if raw_qc:
+                qc = json.loads(raw_qc)
+                qc["datasource"] = {"id": datasource_id, "type": datasource_type}
+                if isinstance(qc.get("form_data"), dict):
+                    qc["form_data"]["datasource"] = datasource_ref
+                payload["query_context"] = json.dumps(qc, ensure_ascii=False)
+            payload["datasource_id"] = datasource_id
+            payload["datasource_type"] = datasource_type
+            datasource_change = {
+                "from": current.get("datasource_id"),
+                "to": datasource_id,
+                "dashboards": [
+                    {"id": d.get("id"), "title": d.get("dashboard_title")}
+                    for d in current.get("dashboards") or []
+                    if isinstance(d, dict)
+                ],
+            }
+
         result = await client.put(f"/api/v1/chart/{chart_id}", json_data=payload)
+        if datasource_change:
+            result["_datasource_changed"] = datasource_change
 
         # Auto-sync: when dashboards or datasource change
         if dashboards is not None:

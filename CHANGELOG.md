@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Asynchronous SQL Lab execution in `superset_sqllab_execute`.** On a connection with "Asynchronous query execution" enabled the query runs on a Celery worker and the tool polls it (up to `wait_seconds`, default 50, max 300), then returns the rows exactly like a synchronous call; a query still running is returned as `status: running` with its id. Synchronous execution held the HTTP request open, so anything longer than the SQL Lab / HTTP timeout (30-60 s) failed while the query kept running with an unknown outcome. New `run_async` argument (default: whatever the connection allows). Connections without async execution behave as before.
+- **`superset_dashboard_copy(duplicate_charts=True)`** copies the charts too (new ids, bound only to the copy), carries over the layout, colours and CSS, and re-points native filters and cross-filters at the copied charts - Superset remaps ids only in the layout and legacy filter scopes, so a filter that excluded chart 890 would otherwise apply to 890's copy. The original dashboard, its charts, datasets and roles are left untouched (the automatic dataset and role adjustments of a plain copy are skipped). Optional `chart_name_prefix` marks the copied charts. The default (shared charts) is unchanged.
+- **`superset_chart_update(datasource_id=...)`** switches a chart to another dataset, updating the dataset reference inside `params` and `query_context` so nothing else has to be passed; the response lists every dashboard the chart is on.
+
+### Fixed
+
+- **The SQL guard could be bypassed, and flagged harmless queries.** Comments and string literals were stripped in two separate passes, so `SELECT '--'; DROP TABLE t` lost its `DROP` to the comment pass, and a `--` inside a literal broke the parse of the rest of the query (a false `EXECUTE` hit). Comments, `'...'` / `E'...'` / `$tag$...$tag$` literals and quoted identifiers are now blanked out in one pass.
+
 ## [0.4.0] - 2026-08-20
 
 First release of this fork (`mcp-superset-sso`), based on upstream
