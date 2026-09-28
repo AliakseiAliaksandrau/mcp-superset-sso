@@ -52,9 +52,81 @@ def _mock_sqllab(result_rows, log_rows=None):
         return_value=httpx.Response(200, json={"result": {"status": "success", "results_key": "k"}})
     )
     respx.get(f"{BASE}/api/v1/sqllab/results/").mock(
-        return_value=httpx.Response(200, json={"status": "success", "data": result_rows})
+        return_value=httpx.Response(200, json={"status": "success", "query_id": 70, "data": result_rows})
     )
     return calls
+
+
+# --- logging: every call leaves one line that leads to mart._refresh_log and the SQL Lab history ---
+
+
+def _mart_lines(caplog):
+    return [r for r in caplog.records if r.name == "mcp_superset.tools.mart"]
+
+
+@respx.mock
+async def test_a_successful_apply_is_logged_with_its_ids(mcp_server, caplog):
+    caplog.set_level("INFO", logger="mcp_superset")
+    _mock_sqllab([{"result": "mart.x_mart v1 применена"}], log_rows=[{"id": 5, "status": "ok"}])
+    async with Client(mcp_server) as c:
+        await c.call_tool("mart_apply", {"name": "x_mart", "sql": "select 1 as a", "comment": "c"})
+
+    (line,) = _mart_lines(caplog)
+    text = line.getMessage()
+    assert line.levelname == "INFO"
+    assert "tool=mart_apply mart=x_mart user=mcp-service outcome=ok" in text
+    assert "query_id=70" in text
+    request_id = text.split("request_id=")[1].split()[0]
+    assert len(request_id) == 36
+
+
+@respx.mock
+async def test_a_failed_build_is_logged_as_a_warning(mcp_server, caplog):
+    caplog.set_level("INFO", logger="mcp_superset")
+    _mock_sqllab(
+        [{"result": "mart.x_mart v2 НЕ применена: ошибка 42703"}],
+        log_rows=[{"id": 6, "status": "error", "error": 'column "val" does not exist'}],
+    )
+    async with Client(mcp_server) as c:
+        await c.call_tool("mart_apply", {"name": "x_mart", "sql": "select val", "comment": "c", "expected_version": 1})
+
+    (line,) = _mart_lines(caplog)
+    assert line.levelname == "WARNING"
+    assert "outcome=build_failed" in line.getMessage()
+    assert 'column "val" does not exist' in line.getMessage()
+
+
+@respx.mock
+async def test_a_refused_call_is_logged(mcp_server, caplog):
+    caplog.set_level("INFO", logger="mcp_superset")
+    async with Client(mcp_server) as c:
+        await c.call_tool("mart_apply", {"name": "x_mart", "sql": "select {{ x }}", "comment": "c"})
+
+    (line,) = _mart_lines(caplog)
+    assert line.levelname == "WARNING"
+    assert "tool=mart_apply mart=x_mart user=mcp-service outcome=refused" in line.getMessage()
+    assert "Jinja" in line.getMessage()
+
+
+@respx.mock
+async def test_an_async_failure_is_logged_by_both_layers(mcp_server, caplog):
+    caplog.set_level("INFO", logger="mcp_superset")
+    respx.get(f"{BASE}/api/v1/security/csrf_token/").mock(return_value=httpx.Response(200, json={"result": "csrf"}))
+    respx.post(f"{BASE}/api/v1/sqllab/execute/").mock(
+        return_value=httpx.Response(202, json={"query": {"id": "c1", "queryId": 73, "state": "pending"}})
+    )
+    respx.get(f"{BASE}/api/v1/query/73").mock(
+        return_value=httpx.Response(200, json={"result": {"status": "failed", "error_message": "витрину уже изменили"}})
+    )
+    async with Client(mcp_server) as c:
+        await c.call_tool("mart_refresh", {"name": "x_mart", "now": True})
+
+    (mart_line,) = _mart_lines(caplog)
+    assert mart_line.levelname == "WARNING"
+    assert "tool=mart_refresh(now) mart=x_mart" in mart_line.getMessage()
+    assert "outcome=error" in mart_line.getMessage() and "query_id=73" in mart_line.getMessage()
+    sqllab = [r for r in caplog.records if r.name == "mcp_superset.tools.queries"]
+    assert any("query_id=73 status=failed" in r.getMessage() and "database_id=3" in r.getMessage() for r in sqllab)
 
 
 def test_literals_and_arrays():

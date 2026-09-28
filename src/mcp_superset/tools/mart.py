@@ -13,15 +13,19 @@ would run and then be rolled back.
 """
 
 import json
+import logging
 import os
 import re
 import secrets
+import time
 import uuid
 from typing import Any
 
 from mcp_superset import context
 from mcp_superset.tools.queries import run_sqllab_query
 from mcp_superset.tools.types import StrList
+
+logger = logging.getLogger(__name__)
 
 MART_WAIT_SECONDS = 280.0
 
@@ -173,22 +177,110 @@ def _not_configured() -> str:
     )
 
 
+# --- logging -------------------------------------------------------------------------
+# One line per call, so a failure can be traced from the MCP log to the rest:
+# request_id -> mart._refresh_log.request_id, query_id -> Superset's SQL Lab query history.
+# Container logs do not survive a redeploy; mart._refresh_log and the query history do.
+
+
+def _short(value: Any, limit: int = 300) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _query_id(raw: dict) -> Any:
+    return raw.get("query_id") or (raw.get("query") or {}).get("queryId") or (raw.get("query") or {}).get("serverId")
+
+
+def _log_call(
+    tool: str,
+    mart: str | None,
+    outcome: str,
+    started: float,
+    *,
+    request_id: str | None = None,
+    query_id: Any = None,
+    detail: Any = None,
+) -> None:
+    """Log one mart tool call: INFO when it went through or is still running, WARNING otherwise."""
+    level = logging.INFO if outcome in ("ok", "running") else logging.WARNING
+    logger.log(
+        level,
+        "mart call: tool=%s mart=%s user=%s outcome=%s duration=%.1fs request_id=%s query_id=%s%s",
+        tool,
+        mart or "-",
+        _actor(),
+        outcome,
+        time.monotonic() - started,
+        request_id or "-",
+        query_id if query_id is not None else "-",
+        f" detail={_short(detail)}" if detail else "",
+    )
+
+
+def _refuse(tool: str, mart: str | None, message: str, **extra: Any) -> str:
+    """Refuse a call before anything is sent, and log why."""
+    logger.warning(
+        "mart call: tool=%s mart=%s user=%s outcome=refused detail=%s", tool, mart or "-", _actor(), _short(message)
+    )
+    return json.dumps({"error": message, **extra}, ensure_ascii=False)
+
+
 def register_mart_tools(mcp):
     from mcp_superset.context import current_client as client
 
-    async def _log_for(request_id: str) -> dict | None:
+    async def _read(tool: str, mart: str | None, sql: str, tab: str) -> dict:
+        """A read-only query; only failures are worth a log line."""
+        started = time.monotonic()
+        try:
+            raw = await _run(client, sql, write=False, tab=tab)
+        except Exception as exc:
+            _log_call(tool, mart, "exception", started, detail=exc)
+            raise
+        if raw.get("status") not in (None, "success") or raw.get("error"):
+            _log_call(tool, mart, "error", started, query_id=_query_id(raw), detail=raw.get("error") or raw)
+        return raw
+
+    async def _log_for(tool: str, mart: str, request_id: str) -> dict | None:
         sql = (
             "SELECT id, name, version, action, status, row_count, duration_ms, error_code, error, "
             "diagnosis, columns_diff, warnings FROM mart._refresh_log "
             f"WHERE request_id = {_lit(request_id)} ORDER BY id DESC LIMIT 1"
         )
-        rows = _rows(await _run(client, sql, write=False, tab="mart: log"))
+        rows = _rows(await _read(tool, mart, sql, "mart: log"))
         return rows[0] if rows else None
 
-    async def _write(call: str, tab: str, wait_seconds: float, request_id: str | None = None) -> str:
-        outcome = _outcome(await _run(client, _call_script(call), write=True, tab=tab, wait_seconds=wait_seconds))
+    async def _write(
+        tool: str, mart: str, call: str, tab: str, wait_seconds: float, request_id: str | None = None
+    ) -> str:
+        started = time.monotonic()
+        try:
+            raw = await _run(client, _call_script(call), write=True, tab=tab, wait_seconds=wait_seconds)
+        except Exception as exc:
+            _log_call(tool, mart, "exception", started, request_id=request_id, detail=exc)
+            raise
+        outcome = _outcome(raw)
         if request_id and "result" in outcome:
-            outcome["log"] = await _log_for(request_id)
+            outcome["log"] = await _log_for(tool, mart, request_id)
+        if "result" in outcome:
+            log_entry = outcome.get("log") or {}
+            # mart.apply/refresh report a failed build in the result and the log, not as an error
+            failed_build = log_entry.get("status") == "error"
+            _log_call(
+                tool,
+                mart,
+                "build_failed" if failed_build else "ok",
+                started,
+                request_id=request_id,
+                query_id=_query_id(raw),
+                detail=(log_entry.get("error") if failed_build else None) or outcome["result"],
+            )
+        elif "error" in outcome:
+            _log_call(
+                tool, mart, "error", started, request_id=request_id, query_id=_query_id(raw), detail=outcome["error"]
+            )
+        else:
+            _log_call(tool, mart, "running", started, request_id=request_id, query_id=_query_id(raw))
         return json.dumps(outcome, ensure_ascii=False, default=str)
 
     async def _apply(
@@ -201,17 +293,18 @@ def register_mart_tools(mcp):
         source_dataset_id: int | None,
         allow_column_removal: bool,
         wait_seconds: float,
+        tool: str = "mart_apply",
     ) -> str:
         for error in (_check_name(name), _check_text(sql=sql, comment=comment, description=description)):
             if error:
-                return json.dumps({"error": error}, ensure_ascii=False)
+                return _refuse(tool, name, error)
         if not (comment or "").strip():
-            return json.dumps({"error": "comment is required: say why the mart is created or changed."})
+            return _refuse(tool, name, "comment is required: say why the mart is created or changed.")
         if not (sql or "").strip():
-            return json.dumps({"error": "sql is empty."})
+            return _refuse(tool, name, "sql is empty.")
         for spec in indexes or []:
             if not all(_COLUMN.match(col.strip()) for col in spec.split(",")):
-                return json.dumps({"error": f"Invalid index {spec!r}: comma-separated lowercase column names."})
+                return _refuse(tool, name, f"Invalid index {spec!r}: comma-separated lowercase column names.")
 
         request_id = str(uuid.uuid4())
         tag = _dollar_tag(sql)
@@ -228,7 +321,7 @@ def register_mart_tools(mcp):
             f"p_allow_column_removal => {_lit(bool(allow_column_removal))}, "
             f"p_request_id => {_lit(request_id)})"
         )
-        return await _write(call, f"mart: apply {name}", wait_seconds, request_id)
+        return await _write(tool, name, call, f"mart: apply {name}", wait_seconds, request_id)
 
     @mcp.tool
     async def mart_guide() -> str:
@@ -240,14 +333,14 @@ def register_mart_tools(mcp):
         if mart_database_id() is None:
             return _not_configured()
         settings = _rows(
-            await _run(client, "SELECT key, value FROM mart._settings ORDER BY key", write=False, tab="mart: guide")
+            await _read("mart_guide", None, "SELECT key, value FROM mart._settings ORDER BY key", "mart: guide")
         )
         marts = _rows(
-            await _run(
-                client,
+            await _read(
+                "mart_guide",
+                None,
                 "SELECT name, version, status, data_as_of, row_count, rebuild_pending FROM mart._status ORDER BY name",
-                write=False,
-                tab="mart: guide",
+                "mart: guide",
             )
         )
         return json.dumps(
@@ -261,7 +354,7 @@ def register_mart_tools(mcp):
         """List marts with their state: version, status, data time (Moscow), rows, schedule, last error."""
         if mart_database_id() is None:
             return _not_configured()
-        result = await _run(client, "SELECT * FROM mart._status ORDER BY name", write=False, tab="mart: list")
+        result = await _read("mart_list", None, "SELECT * FROM mart._status ORDER BY name", "mart: list")
         return json.dumps(_rows(result) if "data" in result else result, ensure_ascii=False, default=str)
 
     @mcp.tool
@@ -277,7 +370,7 @@ def register_mart_tools(mcp):
         if mart_database_id() is None:
             return _not_configured()
         if error := _check_name(name):
-            return json.dumps({"error": error}, ensure_ascii=False)
+            return _refuse("mart_get", name, error)
         n = _lit(name)
         registry_row = "to_jsonb(r)" if include_sql else "to_jsonb(r) - 'sql'"
         registry = f"(SELECT {registry_row} FROM mart._registry r WHERE r.name = {n})"
@@ -295,7 +388,7 @@ def register_mart_tools(mcp):
             f"'diagnosis', (SELECT mart.diagnose(r.name) FROM mart._registry r WHERE r.name = {n} AND r.status <> 'ok')"
             ") AS mart"
         )
-        rows = _rows(await _run(client, sql, write=False, tab="mart: get"))
+        rows = _rows(await _read("mart_get", name, sql, "mart: get"))
         info = rows[0]["mart"] if rows else None
         if isinstance(info, str):
             info = json.loads(info)
@@ -316,7 +409,7 @@ def register_mart_tools(mcp):
         where = ""
         if name:
             if error := _check_name(name):
-                return json.dumps({"error": error}, ensure_ascii=False)
+                return _refuse("mart_log", name, error)
             where = f"WHERE name = {_lit(name)} "
         sql = (
             "SELECT id, name, version, action, reason, status, requested_by, "
@@ -324,7 +417,7 @@ def register_mart_tools(mcp):
             "duration_ms, row_count, error_code, left(error, 1000) AS error, diagnosis, columns_diff, warnings "
             f"FROM mart._refresh_log {where}ORDER BY id DESC LIMIT {max(1, min(int(limit), 200))}"
         )
-        return json.dumps(_rows(await _run(client, sql, write=False, tab="mart: log")), ensure_ascii=False, default=str)
+        return json.dumps(_rows(await _read("mart_log", name, sql, "mart: log")), ensure_ascii=False, default=str)
 
     @mcp.tool
     async def mart_apply(
@@ -398,25 +491,24 @@ def register_mart_tools(mcp):
         """
         if mart_database_id() is None:
             return _not_configured()
+        tool = "mart_create_from_dataset"
         dataset = (await client.get(f"/api/v1/dataset/{dataset_id}")).get("result", {})
         sql = dataset.get("sql")
         if not sql:
-            return json.dumps(
-                {"error": f"Dataset {dataset_id} is not a virtual dataset (no SQL): there is nothing to materialize."},
-                ensure_ascii=False,
+            return _refuse(
+                tool, name, f"Dataset {dataset_id} is not a virtual dataset (no SQL): there is nothing to materialize."
             )
         if _JINJA.search(sql):
             snippets = sorted({m.group(0) for m in re.finditer(r"\{[{%#].{0,60}?[}%#]\}", sql, re.S)})[:5]
-            return json.dumps(
-                {
-                    "error": (
-                        f"Dataset {dataset_id} uses Jinja, which a mart cannot hold. Rework these parts into "
-                        "plain SQL (e.g. one row per filter variant, picked by a thin dataset over the mart), "
-                        "then create the mart with mart_apply."
-                    ),
-                    "jinja": snippets,
-                },
-                ensure_ascii=False,
+            return _refuse(
+                tool,
+                name,
+                (
+                    f"Dataset {dataset_id} uses Jinja, which a mart cannot hold. Rework these parts into "
+                    "plain SQL (e.g. one row per filter variant, picked by a thin dataset over the mart), "
+                    "then create the mart with mart_apply."
+                ),
+                jinja=snippets,
             )
         return await _apply(
             name,
@@ -428,6 +520,7 @@ def register_mart_tools(mcp):
             dataset_id,
             False,
             wait_seconds,
+            tool=tool,
         )
 
     @mcp.tool
@@ -443,12 +536,13 @@ def register_mart_tools(mcp):
         if mart_database_id() is None:
             return _not_configured()
         if error := _check_name(name):
-            return json.dumps({"error": error}, ensure_ascii=False)
+            return _refuse("mart_refresh", name, error)
         if not now:
-            return await _write(f"mart.request_refresh({_lit(name)}, {_lit(_actor())})", f"mart: refresh {name}", 60)
+            call = f"mart.request_refresh({_lit(name)}, {_lit(_actor())})"
+            return await _write("mart_refresh(queue)", name, call, f"mart: refresh {name}", 60)
         request_id = str(uuid.uuid4())
         call = f"mart.refresh({_lit(name)}, {_lit(_actor())}, {_lit(request_id)})"
-        return await _write(call, f"mart: refresh {name}", wait_seconds, request_id)
+        return await _write("mart_refresh(now)", name, call, f"mart: refresh {name}", wait_seconds, request_id)
 
     @mcp.tool
     async def mart_set_schedule(
@@ -478,16 +572,17 @@ def register_mart_tools(mcp):
         """
         if mart_database_id() is None:
             return _not_configured()
+        tool = "mart_set_schedule"
         if error := _check_name(name):
-            return json.dumps({"error": error}, ensure_ascii=False)
+            return _refuse(tool, name, error)
         for value in (refresh_at or []) + [v for v in (every_from, every_to) if v]:
             if not _TIME.match(value):
-                return json.dumps({"error": f"Invalid time {value!r}: use HH:MM."})
+                return _refuse(tool, name, f"Invalid time {value!r}: use HH:MM.")
         if refresh_every and not _INTERVAL.match(refresh_every.strip()):
-            return json.dumps({"error": f"Invalid period {refresh_every!r}: e.g. '30 minutes', '1 hour'."})
+            return _refuse(tool, name, f"Invalid period {refresh_every!r}: e.g. '30 minutes', '1 hour'.")
         for source in refresh_on or []:
             if not re.match(r"^([a-z_][a-z0-9_]*\.)?[a-z_][a-z0-9_]*$", source.strip().lower()):
-                return json.dumps({"error": f"Invalid source name {source!r}."})
+                return _refuse(tool, name, f"Invalid source name {source!r}.")
         call = (
             "mart.set_schedule("
             f"p_name => {_lit(name)}, "
@@ -501,7 +596,7 @@ def register_mart_tools(mcp):
             f"p_enabled => {_lit(enabled)}, "
             f"p_clear_every => {_lit(bool(clear_every))})"
         )
-        return await _write(call, f"mart: schedule {name}", 60)
+        return await _write(tool, name, call, f"mart: schedule {name}", 60)
 
     @mcp.tool
     async def mart_remove(name: str, comment: str) -> str:
@@ -517,8 +612,8 @@ def register_mart_tools(mcp):
             return _not_configured()
         for error in (_check_name(name), _check_text(comment=comment)):
             if error:
-                return json.dumps({"error": error}, ensure_ascii=False)
+                return _refuse("mart_remove", name, error)
         if not (comment or "").strip():
-            return json.dumps({"error": "comment is required: say why the mart is removed."})
+            return _refuse("mart_remove", name, "comment is required: say why the mart is removed.")
         call = f"mart.remove({_lit(name)}, {_lit(comment.strip())}, {_lit(_actor())})"
-        return await _write(call, f"mart: remove {name}", 120)
+        return await _write("mart_remove", name, call, f"mart: remove {name}", 120)

@@ -2,8 +2,11 @@
 
 import asyncio
 import json
+import logging
 import re
 import time
+
+logger = logging.getLogger(__name__)
 
 _IDENT_CHAR = re.compile(r"[A-Za-z0-9_$]")
 _DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
@@ -189,11 +192,20 @@ async def run_sqllab_query(
         # Nothing to wait for: the response already is the result.
         return started
 
-    deadline = time.monotonic() + max(0.0, min(wait_seconds, SQLLAB_MAX_WAIT_SECONDS))
+    begun = time.monotonic()
+    deadline = begun + max(0.0, min(wait_seconds, SQLLAB_MAX_WAIT_SECONDS))
+    where = f"database_id={payload.get('database_id')} tab={payload.get('tab') or '-'}"
     while True:
         info = (await client.get(f"/api/v1/query/{query_id}")).get("result", {})
         status = info.get("status")
         if status == "success":
+            logger.info(
+                "sqllab async: query_id=%s status=success rows=%s waited=%.1fs %s",
+                query_id,
+                info.get("rows"),
+                time.monotonic() - begun,
+                where,
+            )
             if info.get("results_key"):
                 return await client.get(
                     "/api/v1/sqllab/results/",
@@ -201,8 +213,23 @@ async def run_sqllab_query(
                 )
             return {"status": status, "query_id": query_id, "rows": info.get("rows")}
         if status in _FAILED_STATES:
+            logger.warning(
+                "sqllab async: query_id=%s status=%s waited=%.1fs %s error=%s",
+                query_id,
+                status,
+                time.monotonic() - begun,
+                where,
+                " ".join(str(info.get("error_message")).split())[:300],
+            )
             return {"status": status, "query_id": query_id, "error": info.get("error_message")}
         if time.monotonic() >= deadline:
+            logger.info(
+                "sqllab async: query_id=%s status=%s still running after %.1fs %s",
+                query_id,
+                status or "running",
+                time.monotonic() - begun,
+                where,
+            )
             return {
                 "status": status or "running",
                 "query_id": query_id,
