@@ -135,6 +135,16 @@ _POLL_INTERVAL_SECONDS = 1.0
 _FAILED_STATES = {"failed", "stopped", "timed_out"}
 
 
+def _results_rison(results_key: str) -> str:
+    """RISON argument for /api/v1/sqllab/results/.
+
+    The key must be a quoted RISON string: unquoted, a UUID starting with a digit
+    is parsed as a number and Superset answers "Not a valid rison/json argument".
+    """
+    escaped = results_key.replace("!", "!!").replace("'", "!'")
+    return f"(key:'{escaped}')"
+
+
 async def database_allows_async(client, database_id: int) -> bool:
     """Whether a database connection has "Asynchronous query execution" enabled."""
     info = await client.get(f"/api/v1/database/{database_id}")
@@ -187,7 +197,7 @@ async def run_sqllab_query(
             if info.get("results_key"):
                 return await client.get(
                     "/api/v1/sqllab/results/",
-                    params={"q": f"(key:{info['results_key']})"},
+                    params={"q": _results_rison(info["results_key"])},
                 )
             return {"status": status, "query_id": query_id, "rows": info.get("rows")}
         if status in _FAILED_STATES:
@@ -307,7 +317,7 @@ def register_query_tools(mcp):
         """
         result = await client.get(
             "/api/v1/sqllab/results/",
-            params={"q": f"(key:{results_key})"},
+            params={"q": _results_rison(results_key)},
         )
         return json.dumps(result, ensure_ascii=False)
 

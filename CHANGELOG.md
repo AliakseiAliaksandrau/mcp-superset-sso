@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`superset_sqllab_results` (and the async path of `superset_sqllab_execute`) sent the results key unquoted.** A UUID key starts with a digit in 10 cases out of 16, and then RISON parsed it as a number and Superset answered `400 Not a valid rison/json argument`. The key is now a quoted RISON string.
+- **Dependencies had no upper bounds.** The container installs the package at every start; on 2026-09-28 that pulled fastmcp 4 and mcp 2, whose `mcp.shared.version` (used by `protocol_compat`) no longer exists, and the server crashed on import. `fastmcp<4` and `mcp<2` are now declared.
 - **The SQL guard could be bypassed, and flagged harmless queries.** Comments and string literals were stripped in two separate passes, so `SELECT '--'; DROP TABLE t` lost its `DROP` to the comment pass, and a `--` inside a literal broke the parse of the rest of the query (a false `EXECUTE` hit). Comments, `'...'` / `E'...'` / `$tag$...$tag$` literals and quoted identifiers are now blanked out in one pass.
 
 ## [0.4.0] - 2026-08-20

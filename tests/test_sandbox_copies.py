@@ -99,7 +99,7 @@ async def test_sqllab_execute_runs_async_and_returns_rows(mcp_server, monkeypatc
         result = await c.call_tool("superset_sqllab_execute", {"database_id": 3, "sql": "SELECT 1 AS x"})
 
     assert json.loads(execute.calls.last.request.content)["runAsync"] is True
-    assert results.calls.last.request.url.params["q"] == "(key:k1)"
+    assert results.calls.last.request.url.params["q"] == "(key:'k1')"
     assert json.loads(_text(result))["data"] == [{"x": 1}]
 
 
@@ -356,3 +356,11 @@ async def test_chart_update_switches_datasource_without_query_context(mcp_server
     sent = json.loads(put.calls.last.request.content)
     assert "query_context" not in sent
     assert json.loads(sent["params"]) == {"datasource": "234__table"}
+
+
+def test_results_key_is_a_quoted_rison_string():
+    # Unquoted, a key starting with a digit is parsed as a number and Superset rejects it.
+    assert (
+        queries._results_rison("18125d80-236e-4044-b89d-d65781dd47bd") == "(key:'18125d80-236e-4044-b89d-d65781dd47bd')"
+    )
+    assert queries._results_rison("a'b!c") == "(key:'a!'b!!c')"
