@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`mart_guide` now warns about filter variants stored as rows.** Every window function and aggregate over such rows must include the variant column, or it adds up all variants at once; and a mart-based copy is compared with the original on all columns and every filter variant before a dataset is switched. Both came out of a real mart whose month-to-date sums were three times too high.
 - **`mart_get` failed with `Expecting property name enclosed in double quotes`, and `mart_list` returned schedules as strings.** SQL Lab renders `json`/`jsonb` columns as a Python repr (`{'a': 1}`) and arrays as a JSON string (`'["00:05:00"]'`). `mart_get` now builds its object as text, and array columns of mart query results are returned as lists.
 - **`superset_sqllab_results` (and the async path of `superset_sqllab_execute`) sent the results key unquoted.** A UUID key starts with a digit in 10 cases out of 16, and then RISON parsed it as a number and Superset answered `400 Not a valid rison/json argument`. The key is now a quoted RISON string.
 - **Dependencies had no upper bounds.** The container installs the package at every start; on 2026-09-28 that pulled fastmcp 4 and mcp 2, whose `mcp.shared.version` (used by `protocol_compat`) no longer exists, and the server crashed on import. `fastmcp<4` and `mcp<2` are now declared.

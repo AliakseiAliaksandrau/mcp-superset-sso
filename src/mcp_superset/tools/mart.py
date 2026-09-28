@@ -57,6 +57,12 @@ Rules
 - The mart SQL must be plain SQL: no Jinja ({{ }}, {% %}). Dashboard filters that a dataset
   applies through Jinja cannot be baked in - keep them in a thin virtual dataset over the mart
   (e.g. store one row per filter variant and pick it in the dataset's WHERE).
+- Rows per filter variant multiply every row: each window function and aggregate over those
+  rows must include the variant column (sum(...) over (partition by ..., variant ...)),
+  otherwise it adds up all variants at once (a real case: month-to-date sums came out 3x).
+- Before a dataset is switched to a mart, compare the original with the mart-based copy on ALL
+  columns and for every filter variant (e.g. per group: count(*) and a hash of the row), not
+  on a few metrics. Source data must not change during the comparison.
 - Changing a mart: pass expected_version (from mart_get); if someone applied a newer version,
   the change is refused. Removing columns needs allow_column_removal=true - check first which
   charts use them.
