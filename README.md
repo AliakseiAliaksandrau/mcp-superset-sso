@@ -5,257 +5,255 @@
 [![Superset 6.x](https://img.shields.io/badge/Superset-6.x-orange.svg)](https://superset.apache.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io/)
 
-A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for [Apache Superset](https://superset.apache.org/) that can act **as the user who is calling it**: the caller signs in with Google, and every tool call runs under their own Superset account — their roles, row-level security, ownership and audit-log entries.
+[MCP](https://modelcontextprotocol.io/)-сервер для [Apache Superset](https://superset.apache.org/), который умеет работать **от имени вызывающего пользователя**: человек логинится через Google, и каждый вызов инструмента выполняется под его собственной учётной записью Superset — его роли, RLS, владение объектами и записи в журнале действий.
 
-Fork of [bintocher/mcp-superset](https://github.com/bintocher/mcp-superset) (MIT, v0.3.1) — all 137 tools and their behaviour come from upstream. This fork adds:
+Форк [bintocher/mcp-superset](https://github.com/bintocher/mcp-superset) (MIT, v0.3.1) — все 137 инструментов и их поведение взяты из upstream. Что добавлено в форке:
 
-- **per-user identity via Google SSO** (`SUPERSET_MCP_AUTH_MODE=google-sso`, see below);
-- `description` support in `superset_chart_create` / `superset_chart_update`;
-- `superset_get_current_user` — reports which Superset user the tools are acting as;
-- `mcp-superset-selftest` — verifies impersonation against a live Superset without a browser.
+- **идентификация каждого пользователя через Google SSO** (`SUPERSET_MCP_AUTH_MODE=google-sso`, см. ниже);
+- поддержка `description` в `superset_chart_create` / `superset_chart_update`;
+- `superset_get_current_user` — показывает, от чьего имени сейчас работают инструменты;
+- `mcp-superset-selftest` — проверка работы от имени пользователя на живом Superset без браузера.
 
-Upstream's single-service-account behaviour is still the default, so existing deployments are unaffected.
+Поведение upstream (один сервисный аккаунт на всех) осталось режимом по умолчанию, поэтому существующие установки ничего не теряют.
 
-## Per-user identity (Google SSO)
+## Работа от имени пользователя (Google SSO)
 
-### Why
+### Зачем
 
-In service mode the server holds one Superset login. Everybody who uses the MCP server gets that account's permissions, and Superset's action log attributes every change to it. In `google-sso` mode the identity chain is:
+В режиме `service` сервер держит один логин Superset: все пользователи MCP получают права этого аккаунта, и в журнале действий Superset все изменения записаны на него. В режиме `google-sso` цепочка идентификации такая:
 
 ```
-MCP client  --OAuth 2.1-->  this server  --redirect-->  Google (hd=<your domain>)
-                                 |  <- access token, verified e-mail
+MCP-клиент  --OAuth 2.1-->  этот сервер  --redirect-->  Google (hd=<ваш домен>)
+                                 |  <- access token, подтверждённый email
                                  v
-                    e-mail  ->  Superset user (looked up by e-mail)
+                     email  ->  пользователь Superset (поиск по email)
                                  |
                                  v
-             Superset API token minted for that user id  ->  every /api/v1 call
+              API-токен Superset, выпущенный для его user_id  ->  все вызовы /api/v1
 ```
 
-Superset users provisioned through SSO have no password usable with `POST /api/v1/security/login`, so the server mints the same Flask-JWT-Extended access token Superset itself issues: HS256, `sub` = the user's id, signed with Superset's `SECRET_KEY` (`JWT_SECRET_KEY`). Superset then applies that user's own permissions — no permission logic is duplicated in the MCP server.
+У пользователей, созданных через SSO, нет пароля, пригодного для `POST /api/v1/security/login`, поэтому сервер выпускает ровно такой же токен Flask-JWT-Extended, какой Superset выдаёт сам: HS256, `sub` = id пользователя, подпись ключом `SECRET_KEY` Superset (`JWT_SECRET_KEY`). Дальше Superset сам применяет права этого пользователя — никакой логики прав в MCP-сервере не дублируется.
 
-### Configuration
+### Настройка
 
 ```bash
 SUPERSET_MCP_AUTH_MODE=google-sso
 
-# Public HTTPS URL of this server (OAuth metadata and the Google redirect live under it)
+# Публичный HTTPS-адрес этого сервера (под ним лежат OAuth-метаданные и redirect от Google)
 SUPERSET_MCP_PUBLIC_URL=https://mcp.example.com
 
-# Google OAuth client (Web application)
+# OAuth-клиент Google (тип Web application)
 GOOGLE_CLIENT_ID=...apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=GOCSPX-...
 
-# Superset's SECRET_KEY / JWT_SECRET_KEY
+# SECRET_KEY / JWT_SECRET_KEY вашего Superset
 SUPERSET_JWT_SECRET=...
 
-# Only these e-mail domains may use the server (also restricts Google's account chooser)
+# Домены, которым разрешён доступ (также ограничивает выбор аккаунта в Google)
 SUPERSET_MCP_ALLOWED_DOMAINS=example.com
 
-# Service account, used only to look up the Superset user behind an e-mail (needs Admin)
+# Сервисный аккаунт — нужен только чтобы найти пользователя Superset по email (права Admin)
 SUPERSET_BASE_URL=http://superset:8088
 SUPERSET_USERNAME=mcp_service
 SUPERSET_PASSWORD=...
 ```
 
-Optional: `SUPERSET_MCP_TOKEN_TTL` (minted token lifetime, default 600s), `GOOGLE_HOSTED_DOMAIN`, `SUPERSET_JWT_ALGORITHM`, `SUPERSET_MCP_AUTO_CREATE_USERS` + `SUPERSET_MCP_DEFAULT_ROLE`.
+Дополнительно: `SUPERSET_MCP_TOKEN_TTL` (время жизни выпускаемого токена, по умолчанию 600 с), `GOOGLE_HOSTED_DOMAIN`, `SUPERSET_JWT_ALGORITHM`, `SUPERSET_MCP_AUTO_CREATE_USERS` + `SUPERSET_MCP_DEFAULT_ROLE`.
 
-Auto-creation is off by default: Flask-AppBuilder derives usernames from the OAuth provider, so an account pre-created here under a different username can collide with the SSO login on the unique e-mail column. Let users sign in to Superset once instead — the SSO login creates the account, and the server finds it by e-mail.
+Автосоздание пользователей выключено по умолчанию: Flask-AppBuilder формирует username из данных OAuth-провайдера, поэтому заранее созданная здесь запись с другим username может конфликтовать с SSO-входом по уникальному email. Лучше дать человеку один раз войти в Superset через Google — учётная запись создастся сама, а сервер найдёт её по email.
 
-### Google Cloud setup
+### Настройка в Google Cloud
 
-In the OAuth client (Web application) add as an authorized redirect URI:
+В OAuth-клиенте (Web application) добавьте authorized redirect URI:
 
 ```
 https://<SUPERSET_MCP_PUBLIC_URL>/auth/callback
 ```
 
-The same client can serve Superset's own UI login (`https://<superset-host>/oauth-authorized/google`).
+Тот же клиент может обслуживать и вход в UI Superset (`https://<superset-host>/oauth-authorized/google`).
 
-### Verifying
+### Проверка
 
 ```bash
-# no browser needed: resolves the e-mail, mints that user's token, calls Superset
+# без браузера: находит пользователя по email, выпускает его токен, обращается к Superset
 mcp-superset-selftest someone@example.com
 
-# what the server reports about itself
+# что сервер сообщает о себе
 curl https://mcp.example.com/health
 
-# unauthenticated calls are rejected with an OAuth challenge
+# без авторизации запросы отклоняются с OAuth-челленджем
 curl -i -X POST https://mcp.example.com/mcp
 ```
 
-From an MCP client, call `superset_get_current_user`: it returns the Superset account the tools act as.
+Из MCP-клиента вызовите `superset_get_current_user` — он вернёт учётную запись Superset, от имени которой работают инструменты.
 
-### Security notes
+### Безопасность
 
-- The process can act as any Superset user, so treat `SUPERSET_JWT_SECRET` like Superset's own secret: keep it in an env file readable only by the service, and rotate it in both places together.
-- Always terminate TLS in front of the server; Google will only redirect to HTTPS.
-- Keep `SUPERSET_MCP_ALLOWED_DOMAINS` set — without it, any Google account the OAuth client accepts can reach the e-mail lookup.
-- `deploy/` contains the Docker and nginx reference configuration used in production.
+- Процесс может действовать от имени любого пользователя Superset, поэтому к `SUPERSET_JWT_SECRET` относитесь как к самому секрету Superset: храните в env-файле, доступном только сервису, и ротируйте одновременно в обоих местах.
+- Всегда терминируйте TLS перед сервером — Google делает redirect только на HTTPS.
+- Держите `SUPERSET_MCP_ALLOWED_DOMAINS` заполненным: без него доступ к поиску по email получит любой Google-аккаунт, который принимает OAuth-клиент.
+- Референс-конфигурация Docker и nginx — в каталоге [`deploy/`](deploy/).
 
-## Comparison with Other Superset MCP Servers
+## Сравнение с другими MCP-серверами для Superset
 
-| Feature | **mcp-superset** | [superset-mcp](https://github.com/aptro/superset-mcp) | [superset-mcp (Winding2020)](https://github.com/Winding2020/superset-mcp) | [superset-mcp-server](https://github.com/LiusCraft/superset-mcp-server) |
-|---------|:-:|:-:|:-:|:-:|
-| **Total tools** | **137** | 60 | 31 | 4 |
-| Language | Python | Python | TypeScript | TypeScript |
-| Dashboard CRUD | 15 tools | 5 | 8 | - |
-| Dashboard native filters | **5 tools** | - | - | - |
-| Chart CRUD | 11 tools | 5 | 7 | - |
-| Database tools | 18 tools | 14 | 1 | 1 |
-| Dataset tools | 11 tools | 3 | 7 | - |
-| SQL Lab | 5 tools | 7 | 1 | 1 |
-| **Security (users/roles)** | **26 tools** | 2 | - | - |
-| **Row Level Security** | **5 tools** | - | - | - |
-| **Groups** | **9 tools** | - | - | - |
-| **Permissions audit** | **yes** | - | - | - |
-| **Dashboard access grant/revoke** | **yes** | - | - | - |
-| **Auto datasource_access sync** | **yes** | - | - | - |
-| Reports & annotations | 10 tools | - | - | - |
-| Tags | 7 tools | 7 | - | - |
-| Asset export/import | yes | - | - | - |
-| **Safety: confirmation flags** | **14 types** | - | - | - |
-| **Safety: DDL/DML blocking** | **yes** | - | - | - |
-| **Safety: system role protection** | **yes** | - | - | - |
-| Transport | HTTP, SSE, stdio | stdio | stdio | stdio |
-| Auth method | JWT + auto-refresh + CSRF | Username/password + token file | Username/password or token | LDAP |
-| Superset versions | 6.0.1 | 4.1.1 | not specified | not specified |
-| CLI with args | `--host --port --transport` | - | - | - |
-| PyPI package | `mcp-superset` | `superset-mcp` | `superset-mcp` (npm) | - |
-| uvx support | **yes** | - | - | - |
-| License | MIT | MIT | - | Apache 2.0 |
-| GitHub stars | new | 170 | 21 | 5 |
+| Возможность | **mcp-superset** | [superset-mcp](https://github.com/aptro/superset-mcp) | [superset-mcp (Winding2020)](https://github.com/Winding2020/superset-mcp) | [superset-mcp-server](https://github.com/LiusCraft/superset-mcp-server) |
+|-------------|:-:|:-:|:-:|:-:|
+| **Всего инструментов** | **137** | 60 | 31 | 4 |
+| Язык | Python | Python | TypeScript | TypeScript |
+| Дашборды CRUD | 15 | 5 | 8 | - |
+| Нативные фильтры | **5** | - | - | - |
+| Графики CRUD | 11 | 5 | 7 | - |
+| Базы данных | 18 | 14 | 1 | 1 |
+| Датасеты | 11 | 3 | 7 | - |
+| SQL Lab | 5 | 7 | 1 | 1 |
+| **Безопасность (пользователи/роли)** | **26** | 2 | - | - |
+| **Row Level Security** | **5** | - | - | - |
+| **Группы** | **9** | - | - | - |
+| **Аудит прав** | **да** | - | - | - |
+| **Grant/revoke доступа** | **да** | - | - | - |
+| **Авто-синхр. datasource_access** | **да** | - | - | - |
+| Отчёты и аннотации | 10 | - | - | - |
+| Теги | 7 | 7 | - | - |
+| Экспорт/импорт ассетов | да | - | - | - |
+| **Защита: флаги подтверждения** | **14 типов** | - | - | - |
+| **Защита: блокировка DDL/DML** | **да** | - | - | - |
+| **Защита: системные роли** | **да** | - | - | - |
+| Транспорт | HTTP, SSE, stdio | stdio | stdio | stdio |
+| Аутентификация | JWT + авто-refresh + CSRF | Username/password + файл токена | Username/password или токен | LDAP |
+| Версии Superset | 6.0.1 | 4.1.1 | не указано | не указано |
+| CLI с параметрами | `--host --port --transport` | - | - | - |
+| PyPI | `mcp-superset` | `superset-mcp` | `superset-mcp` (npm) | - |
+| uvx | **да** | - | - | - |
+| Лицензия | MIT | MIT | - | Apache 2.0 |
 
-**Key differentiators:**
-- Only MCP server with **full security management** (users, roles, RLS, groups, permissions audit)
-- Only one with **built-in safety validations** (confirmation flags, DDL/DML blocking)
-- Only one with **dashboard native filter management**
-- Only one with **automatic datasource_access synchronization**
-- Only one with **multiple transport options** (HTTP, SSE, stdio)
-- Only one with **configurable CLI** (`--host`, `--port`, `--transport`, `--env-file`)
+**Ключевые отличия:**
+- Единственный MCP-сервер с **полным управлением безопасностью** (пользователи, роли, RLS, группы, аудит прав)
+- Единственный с **встроенной защитой** (флаги подтверждения, блокировка DDL/DML)
+- Единственный с **управлением нативными фильтрами дашбордов**
+- Единственный с **автоматической синхронизацией datasource_access**
+- Единственный с **несколькими транспортами** (HTTP, SSE, stdio)
+- Единственный с **настраиваемым CLI** (`--host`, `--port`, `--transport`, `--env-file`)
 
-## Features
+## Возможности
 
-- **137 MCP tools** covering the complete Superset REST API
-- **Dashboard management** — CRUD, copy, publish/unpublish, export/import, embedded mode, native filters
-- **Chart management** — CRUD, copy, data retrieval, export/import, cache warmup
-- **Database management** — CRUD, connection testing, schema/table introspection, SQL validation
-- **Dataset management** — CRUD, duplicate, schema refresh, export/import
-- **SQL Lab** — query execution, formatting, cost estimation, results & CSV export
-- **Security** — users, roles, permissions, Row Level Security (RLS), groups
-- **Access control automation** — grant/revoke dashboard access with automatic datasource permission sync
-- **Audit** — comprehensive permissions matrix (user x dashboards x datasets x RLS)
-- **Tags, reports, annotations, saved queries** — full CRUD
-- **Asset export/import** — full instance backup and restore
-- **Built-in safety** — confirmation flags for destructive operations, DDL/DML blocking in SQL Lab
-- **JWT authentication** with automatic token refresh and CSRF handling
-- **Streamable HTTP, SSE, and stdio transports**
+- **137 MCP-инструментов**, покрывающих полный REST API Superset
+- **Управление дашбордами** — CRUD, копирование, публикация, экспорт/импорт, встраивание, нативные фильтры
+- **Управление графиками** — CRUD, копирование, получение данных, экспорт/импорт, прогрев кэша
+- **Управление базами данных** — CRUD, проверка подключения, интроспекция схем/таблиц, валидация SQL
+- **Управление датасетами** — CRUD, дублирование, обновление схемы, экспорт/импорт
+- **SQL Lab** — выполнение запросов, форматирование, оценка стоимости, экспорт результатов
+- **Безопасность** — пользователи, роли, права, Row Level Security (RLS), группы
+- **Автоматизация доступа** — grant/revoke с автоматической синхронизацией datasource_access
+- **Аудит** — матрица прав доступа (пользователь x дашборды x датасеты x RLS)
+- **Теги, отчёты, аннотации, сохранённые запросы** — полный CRUD
+- **Экспорт/импорт ассетов** — полный бэкап и восстановление инстанса
+- **Встроенная защита** — подтверждения для деструктивных операций, блокировка DDL/DML в SQL Lab
+- **JWT-аутентификация** с автоматическим обновлением токенов и CSRF
+- **Транспорты**: Streamable HTTP, SSE, stdio
 
-## Quick Start
+## Быстрый старт
 
-### Installation
+### Установка
 
-This fork is not published to PyPI - install it from git:
+Форк не публикуется в PyPI — ставится из git:
 
 ```bash
-# With pip
+# pip
 pip install "git+https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git@main"
 
-# With uv (recommended)
+# uv (рекомендуется)
 uv pip install "git+https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git@main"
 
-# From a clone (editable, for development)
+# Из клона (editable, для разработки)
 git clone https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git
 cd mcp-superset-sso && uv pip install -e ".[dev]"
 ```
 
-For a containerised deployment see [`deploy/`](deploy/).
+Развёртывание в контейнере — см. [`deploy/`](deploy/).
 
-### Configuration
+### Конфигурация
 
-Create a `.env` file in the current directory, or set environment variables:
+Создайте файл `.env` в текущей директории или установите переменные окружения:
 
 ```env
-# Required
+# Обязательные
 SUPERSET_BASE_URL=https://superset.example.com
 SUPERSET_USERNAME=admin
 SUPERSET_PASSWORD=your_password
 
-# Optional
-SUPERSET_AUTH_PROVIDER=db          # db (default) or ldap
-SUPERSET_MCP_HOST=127.0.0.1       # Server host (default: 127.0.0.1)
-SUPERSET_MCP_PORT=8001             # Server port (default: 8001)
-SUPERSET_MCP_TRANSPORT=streamable-http  # streamable-http (default), sse, or stdio
+# Необязательные
+SUPERSET_AUTH_PROVIDER=db          # db (по умолчанию) или ldap
+SUPERSET_MCP_HOST=127.0.0.1       # Адрес сервера (по умолчанию: 127.0.0.1)
+SUPERSET_MCP_PORT=8001             # Порт сервера (по умолчанию: 8001)
+SUPERSET_MCP_TRANSPORT=streamable-http  # streamable-http (по умолчанию), sse или stdio
 ```
 
-#### Session-cookie authentication (SSO/OAuth)
+#### Аутентификация через session cookie (SSO/OAuth)
 
-When Superset is behind SSO (OAuth/OIDC/SAML), password login via the REST
-API is unavailable. Instead, supply a browser **session cookie**:
+Если Superset работает за SSO (OAuth/OIDC/SAML), вход по логину и паролю
+через REST API недоступен. Вместо этого укажите **session cookie** из браузера:
 
-| Variable | Description |
+| Переменная | Описание |
 | --- | --- |
-| `SUPERSET_SESSION_COOKIE` | Session cookie value copied from your browser. When set, this mode is used instead of username/password. |
-| `SUPERSET_SESSION_COOKIE_NAME` | Cookie name. Defaults to `session`. |
+| `SUPERSET_SESSION_COOKIE` | Значение session cookie из браузера. Если задано, используется вместо логина и пароля. |
+| `SUPERSET_SESSION_COOKIE_NAME` | Имя cookie. По умолчанию `session`. |
 
-Copy the cookie from your browser's dev tools (Application → Cookies →
-your Superset domain → `session`). The MCP server sends it on every request
-and fetches CSRF tokens with it. The session cannot be renewed server-side,
-so when it expires you must paste a fresh value and restart the server.
+Скопируйте cookie из инструментов разработчика браузера (Application →
+Cookies → домен Superset → `session`). MCP-сервер отправляет её с каждым
+запросом и получает с ней CSRF-токены. Сессию нельзя продлить на стороне
+сервера, поэтому после истечения вставьте новое значение и перезапустите сервер.
 
-Two things worth checking before you use this mode:
+Что стоит проверить перед использованием режима:
 
-- **The cookie name is not always `session`.** Instances that set
-  `SESSION_COOKIE_NAME` in `superset_config.py` use a different name (`s`, for
-  example). Use the name shown in dev tools and set `SUPERSET_SESSION_COOKIE_NAME`
-  accordingly.
-- **The instance must accept session authentication on `/api/v1/`.** Where the
-  REST API is configured for JWT only, requests carrying a valid session cookie
-  still return `401 {"msg": "Missing Authorization Header"}` - refreshing the
-  cookie will not help, and JWT mode is the only option there.
+- **Имя cookie не всегда `session`.** Если в `superset_config.py` задан
+  `SESSION_COOKIE_NAME`, имя будет другим (например, `s`). Возьмите имя из
+  инструментов разработчика и укажите его в `SUPERSET_SESSION_COOKIE_NAME`.
+- **Инстанс должен принимать сессионную аутентификацию на `/api/v1/`.** Там, где
+  REST API настроен только на JWT, запрос с рабочей cookie всё равно вернёт
+  `401 {"msg": "Missing Authorization Header"}` - обновление cookie не поможет,
+  подходит только режим JWT.
 
-Treat the cookie as a credential: it grants full access to your Superset
-account for the lifetime of the session. Keep it in `.env` (which is
-gitignored), not in shell history or committed config.
+Относитесь к cookie как к учётным данным: она даёт полный доступ к вашей учётной
+записи Superset на всё время жизни сессии. Храните её в `.env` (файл в
+gitignore), а не в истории команд и не в закоммиченных конфигах.
 
-### Running
+### Запуск
 
 ```bash
-# Using CLI (after install)
+# Через CLI (после установки)
 mcp-superset
 
-# Using Python module
+# Через Python-модуль
 python -m mcp_superset
 
-# With uv from source
+# Через uv из исходников
 uv run mcp-superset
 
-# With custom settings
+# С пользовательскими параметрами
 mcp-superset --host 0.0.0.0 --port 9000 --transport sse
 
-# With custom .env file
+# С указанием .env файла
 mcp-superset --env-file /path/to/.env
 
-# Using stdio transport (for Claude Desktop, Cursor, etc.)
+# Через stdio (для Claude Desktop, Cursor и др.)
 mcp-superset --transport stdio
 ```
 
-### CLI Options
+### Параметры CLI
 
-| Option | Default | Env Variable | Description |
-|--------|---------|-------------|-------------|
-| `--host` | `127.0.0.1` | `SUPERSET_MCP_HOST` | Server bind address |
-| `--port` | `8001` | `SUPERSET_MCP_PORT` | Server bind port |
-| `--transport` | `streamable-http` | `SUPERSET_MCP_TRANSPORT` | Transport: `streamable-http`, `sse`, `stdio` |
-| `--env-file` | auto-detect | — | Path to `.env` file |
-| `--version` | — | — | Show version and exit |
+| Параметр | По умолчанию | Переменная окружения | Описание |
+|----------|-------------|---------------------|----------|
+| `--host` | `127.0.0.1` | `SUPERSET_MCP_HOST` | Адрес привязки сервера |
+| `--port` | `8001` | `SUPERSET_MCP_PORT` | Порт сервера |
+| `--transport` | `streamable-http` | `SUPERSET_MCP_TRANSPORT` | Транспорт: `streamable-http`, `sse`, `stdio` |
+| `--env-file` | авто | — | Путь к `.env` файлу |
+| `--version` | — | — | Показать версию и выйти |
 
-### Connecting to MCP Clients
+### Подключение к MCP-клиентам
 
 #### Claude Code
 
-Add to your project's `.mcp.json`:
+Добавьте в `.mcp.json` проекта:
 
 ```json
 {
@@ -268,11 +266,11 @@ Add to your project's `.mcp.json`:
 }
 ```
 
-Then start the server: `mcp-superset` (see [Running](#running)).
+Затем запустите сервер: `mcp-superset` (см. [Запуск](#запуск)).
 
 #### Claude Desktop
 
-Add to `claude_desktop_config.json`:
+Добавьте в `claude_desktop_config.json`:
 
 ```json
 {
@@ -308,351 +306,350 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-#### Other MCP Clients
+#### Другие MCP-клиенты
 
-Any MCP-compatible client can connect via:
+Любой MCP-совместимый клиент может подключиться через:
 - **Streamable HTTP**: `http://<host>:<port>/mcp`
 - **SSE**: `http://<host>:<port>/sse`
-- **stdio**: pipe to `mcp-superset --transport stdio`
+- **stdio**: пайп к `mcp-superset --transport stdio`
 
-## Available Tools (137)
+## Доступные инструменты (137)
 
-### Dashboards (15 tools)
+### Дашборды (15 инструментов)
 
-| Tool | Description |
-|------|-------------|
-| `superset_dashboard_list` | List dashboards with filtering and pagination |
-| `superset_dashboard_get` | Get dashboard details by ID |
-| `superset_dashboard_create` | Create a new dashboard |
-| `superset_dashboard_update` | Update dashboard properties |
-| `superset_dashboard_delete` | Delete a dashboard (requires confirmation) |
-| `superset_dashboard_copy` | Duplicate a dashboard |
-| `superset_dashboard_publish` | Publish a draft dashboard |
-| `superset_dashboard_unpublish` | Unpublish a dashboard |
-| `superset_dashboard_charts` | List charts in a dashboard |
-| `superset_dashboard_datasets` | List datasets used by a dashboard |
-| `superset_dashboard_export` | Export dashboard as ZIP (base64) |
-| `superset_dashboard_import` | Import dashboard from ZIP file |
-| `superset_dashboard_embedded_get` | Get embedded configuration |
-| `superset_dashboard_embedded_set` | Enable embedded mode with allowed domains |
-| `superset_dashboard_embedded_delete` | Disable embedded mode |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_dashboard_list` | Список дашбордов с фильтрацией и пагинацией |
+| `superset_dashboard_get` | Информация о дашборде по ID |
+| `superset_dashboard_create` | Создать дашборд |
+| `superset_dashboard_update` | Изменить свойства дашборда |
+| `superset_dashboard_delete` | Удалить дашборд (нужно подтверждение) |
+| `superset_dashboard_copy` | Скопировать дашборд |
+| `superset_dashboard_publish` | Опубликовать черновик дашборда |
+| `superset_dashboard_unpublish` | Снять дашборд с публикации |
+| `superset_dashboard_charts` | Графики на дашборде |
+| `superset_dashboard_datasets` | Датасеты, которые использует дашборд |
+| `superset_dashboard_export` | Экспорт дашборда в ZIP (base64) |
+| `superset_dashboard_import` | Импорт дашборда из ZIP-файла |
+| `superset_dashboard_embedded_get` | Настройки встраивания (embedded) |
+| `superset_dashboard_embedded_set` | Включить встраивание для разрешённых доменов |
+| `superset_dashboard_embedded_delete` | Выключить встраивание |
 
-### Dashboard Filters (5 tools)
+### Фильтры дашбордов (5 инструментов)
 
-| Tool | Description |
-|------|-------------|
-| `superset_dashboard_filter_list` | List native filters on a dashboard |
-| `superset_dashboard_filter_add` | Add a native filter (auto-generates correct ID format) |
-| `superset_dashboard_filter_update` | Update an existing native filter |
-| `superset_dashboard_filter_delete` | Remove a native filter (requires confirmation) |
-| `superset_dashboard_filter_reset` | Remove all filters (requires confirmation) |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_dashboard_filter_list` | Нативные фильтры дашборда |
+| `superset_dashboard_filter_add` | Добавить нативный фильтр (ID нужного формата генерируется сам) |
+| `superset_dashboard_filter_update` | Изменить существующий нативный фильтр |
+| `superset_dashboard_filter_delete` | Удалить нативный фильтр (нужно подтверждение) |
+| `superset_dashboard_filter_reset` | Удалить все фильтры (нужно подтверждение) |
 
-### Charts (11 tools)
+### Графики (11 инструментов)
 
-| Tool | Description |
-|------|-------------|
-| `superset_chart_list` | List charts with filtering and pagination |
-| `superset_chart_get` | Get chart details by ID |
-| `superset_chart_create` | Create a new chart |
-| `superset_chart_update` | Update chart properties |
-| `superset_chart_delete` | Delete a chart (requires confirmation) |
-| `superset_chart_copy` | Duplicate a chart |
-| `superset_chart_data` | Execute chart query and get data |
-| `superset_chart_get_data` | Get data from a saved chart |
-| `superset_chart_export` | Export chart as ZIP (base64) |
-| `superset_chart_import` | Import chart from ZIP file |
-| `superset_chart_cache_warmup` | Warm up chart cache |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_chart_list` | Список графиков с фильтрацией и пагинацией |
+| `superset_chart_get` | Информация о графике по ID |
+| `superset_chart_create` | Создать график |
+| `superset_chart_update` | Изменить свойства графика |
+| `superset_chart_delete` | Удалить график (нужно подтверждение) |
+| `superset_chart_copy` | Скопировать график |
+| `superset_chart_data` | Выполнить запрос графика и получить данные |
+| `superset_chart_get_data` | Данные сохранённого графика |
+| `superset_chart_export` | Экспорт графика в ZIP (base64) |
+| `superset_chart_import` | Импорт графика из ZIP-файла |
+| `superset_chart_cache_warmup` | Прогреть кэш графика |
 
-### Databases (18 tools)
+### Базы данных (18 инструментов)
 
-| Tool | Description |
-|------|-------------|
-| `superset_database_list` | List database connections |
-| `superset_database_get` | Get database details |
-| `superset_database_create` | Register a new database connection |
-| `superset_database_update` | Update database settings |
-| `superset_database_delete` | Remove a database (requires confirmation) |
-| `superset_database_test_connection` | Test database connectivity |
-| `superset_database_schemas` | List schemas in a database |
-| `superset_database_tables` | List tables in a schema |
-| `superset_database_catalogs` | List catalogs (for multi-catalog databases) |
-| `superset_database_connection_info` | Get connection string info |
-| `superset_database_function_names` | List available SQL functions |
-| `superset_database_related_objects` | Find charts/datasets using this database |
-| `superset_database_validate_sql` | Validate SQL syntax |
-| `superset_database_validate_parameters` | Validate connection parameters |
-| `superset_database_select_star` | Generate SELECT * query for a table |
-| `superset_database_table_metadata` | Get table column and index metadata |
-| `superset_database_export` | Export database config as ZIP |
-| `superset_database_available_engines` | List supported database engines |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_database_list` | Список подключений к БД |
+| `superset_database_get` | Информация о БД |
+| `superset_database_create` | Зарегистрировать новое подключение к БД |
+| `superset_database_update` | Изменить настройки БД |
+| `superset_database_delete` | Удалить БД (нужно подтверждение) |
+| `superset_database_test_connection` | Проверить подключение к БД |
+| `superset_database_schemas` | Схемы в БД |
+| `superset_database_tables` | Таблицы в схеме |
+| `superset_database_catalogs` | Каталоги (для БД с несколькими каталогами) |
+| `superset_database_connection_info` | Информация о строке подключения |
+| `superset_database_function_names` | Доступные SQL-функции |
+| `superset_database_related_objects` | Графики и датасеты, которые используют эту БД |
+| `superset_database_validate_sql` | Проверить синтаксис SQL |
+| `superset_database_validate_parameters` | Проверить параметры подключения |
+| `superset_database_select_star` | Сгенерировать запрос SELECT * для таблицы |
+| `superset_database_table_metadata` | Метаданные таблицы: колонки и индексы |
+| `superset_database_export` | Экспорт настроек БД в ZIP |
+| `superset_database_available_engines` | Поддерживаемые движки БД |
 
-### Datasets (11 tools)
+### Датасеты (11 инструментов)
 
-| Tool | Description |
-|------|-------------|
-| `superset_dataset_list` | List datasets with filtering |
-| `superset_dataset_get` | Get dataset details including columns and metrics |
-| `superset_dataset_create` | Create a dataset from a table or SQL query |
-| `superset_dataset_update` | Update dataset properties |
-| `superset_dataset_delete` | Delete a dataset (requires confirmation) |
-| `superset_dataset_duplicate` | Duplicate a dataset |
-| `superset_dataset_refresh_schema` | Refresh columns from source |
-| `superset_dataset_related_objects` | Find charts using this dataset |
-| `superset_dataset_export` | Export dataset as ZIP |
-| `superset_dataset_import` | Import dataset from ZIP |
-| `superset_dataset_get_or_create` | Get existing or create new dataset |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_dataset_list` | Список датасетов с фильтрацией |
+| `superset_dataset_get` | Информация о датасете, включая колонки и метрики |
+| `superset_dataset_create` | Создать датасет из таблицы или SQL-запроса |
+| `superset_dataset_update` | Изменить свойства датасета |
+| `superset_dataset_delete` | Удалить датасет (нужно подтверждение) |
+| `superset_dataset_duplicate` | Скопировать датасет |
+| `superset_dataset_refresh_schema` | Обновить колонки из источника |
+| `superset_dataset_related_objects` | Графики, которые используют этот датасет |
+| `superset_dataset_export` | Экспорт датасета в ZIP |
+| `superset_dataset_import` | Импорт датасета из ZIP |
+| `superset_dataset_get_or_create` | Найти существующий датасет или создать новый |
 
-### SQL Lab & Queries (13 tools)
+### SQL Lab и запросы (13 инструментов)
 
-| Tool | Description |
-|------|-------------|
-| `superset_sqllab_execute` | Execute a SQL query (SELECT only) |
-| `superset_sqllab_format_sql` | Format/beautify SQL |
-| `superset_sqllab_results` | Fetch results of a completed query |
-| `superset_sqllab_estimate_cost` | Estimate query execution cost |
-| `superset_sqllab_export_csv` | Export query results as CSV |
-| `superset_query_list` | List executed queries |
-| `superset_query_get` | Get query details and results |
-| `superset_query_stop` | Stop a running query |
-| `superset_saved_query_list` | List saved queries |
-| `superset_saved_query_create` | Save a new query |
-| `superset_saved_query_get` | Get saved query details |
-| `superset_saved_query_update` | Update a saved query |
-| `superset_saved_query_delete` | Delete a saved query (requires confirmation) |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_sqllab_execute` | Выполнить SQL-запрос (только SELECT) |
+| `superset_sqllab_format_sql` | Отформатировать SQL |
+| `superset_sqllab_results` | Результаты завершённого запроса |
+| `superset_sqllab_estimate_cost` | Оценить стоимость выполнения запроса |
+| `superset_sqllab_export_csv` | Экспорт результатов запроса в CSV |
+| `superset_query_list` | Список выполненных запросов |
+| `superset_query_get` | Информация о запросе и его результаты |
+| `superset_query_stop` | Остановить выполняющийся запрос |
+| `superset_saved_query_list` | Список сохранённых запросов |
+| `superset_saved_query_create` | Сохранить новый запрос |
+| `superset_saved_query_get` | Информация о сохранённом запросе |
+| `superset_saved_query_update` | Изменить сохранённый запрос |
+| `superset_saved_query_delete` | Удалить сохранённый запрос (нужно подтверждение) |
 
-### Security & Access Control (26 tools)
+### Безопасность и управление доступом (26 инструментов)
 
-| Tool | Description |
-|------|-------------|
-| `superset_get_current_user` | Get current authenticated user info |
-| `superset_get_current_user_roles` | Get roles of current user |
-| `superset_user_list` | List users with filtering |
-| `superset_user_get` | Get user details |
-| `superset_user_create` | Create a new user |
-| `superset_user_update` | Update user properties |
-| `superset_user_delete` | Delete a user (requires confirmation) |
-| `superset_role_list` | List roles |
-| `superset_role_get` | Get role details |
-| `superset_role_create` | Create a new role |
-| `superset_role_update` | Update role name/description |
-| `superset_role_delete` | Delete a role (requires confirmation, blocks system roles) |
-| `superset_permission_list` | List all available permissions |
-| `superset_role_permissions_get` | Get permissions assigned to a role |
-| `superset_role_permission_add` | Set role permissions (full replacement, requires confirmation) |
-| `superset_role_copy_permissions` | Copy all permissions from one role to another |
-| `superset_dashboard_grant_role_access` | Grant a role access to dashboard and its datasets |
-| `superset_dashboard_revoke_role_access` | Revoke a role's access to dashboard datasets |
-| `superset_bulk_user_role_add` | Add a role to multiple users (by IDs or by current role) |
-| `superset_bulk_user_role_remove` | Remove a role from multiple users |
-| `superset_bulk_user_role_replace` | Replace one role with another for all matching users |
-| `superset_rls_list` | List Row Level Security rules |
-| `superset_rls_get` | Get RLS rule details |
-| `superset_rls_create` | Create an RLS rule |
-| `superset_rls_update` | Update an RLS rule (requires both roles and tables) |
-| `superset_rls_delete` | Delete an RLS rule (requires confirmation) |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_get_current_user` | Текущий аутентифицированный пользователь |
+| `superset_get_current_user_roles` | Роли текущего пользователя |
+| `superset_user_list` | Список пользователей с фильтрацией |
+| `superset_user_get` | Информация о пользователе |
+| `superset_user_create` | Создать пользователя |
+| `superset_user_update` | Изменить свойства пользователя |
+| `superset_user_delete` | Удалить пользователя (нужно подтверждение) |
+| `superset_role_list` | Список ролей |
+| `superset_role_get` | Информация о роли |
+| `superset_role_create` | Создать роль |
+| `superset_role_update` | Изменить название или описание роли |
+| `superset_role_delete` | Удалить роль (нужно подтверждение, системные роли защищены) |
+| `superset_permission_list` | Все доступные права |
+| `superset_role_permissions_get` | Права, назначенные роли |
+| `superset_role_permission_add` | Задать права роли (полная замена, нужно подтверждение) |
+| `superset_role_copy_permissions` | Скопировать все права одной роли в другую |
+| `superset_dashboard_grant_role_access` | Дать роли доступ к дашборду и его датасетам |
+| `superset_dashboard_revoke_role_access` | Отозвать у роли доступ к датасетам дашборда |
+| `superset_bulk_user_role_add` | Добавить роль нескольким пользователям (по ID или по текущей роли) |
+| `superset_bulk_user_role_remove` | Убрать роль у нескольких пользователей |
+| `superset_bulk_user_role_replace` | Заменить одну роль другой у всех подходящих пользователей |
+| `superset_rls_list` | Список правил Row Level Security |
+| `superset_rls_get` | Информация о правиле RLS |
+| `superset_rls_create` | Создать правило RLS |
+| `superset_rls_update` | Изменить правило RLS (нужны и роли, и таблицы) |
+| `superset_rls_delete` | Удалить правило RLS (нужно подтверждение) |
 
-### Groups (9 tools)
+### Группы (9 инструментов)
 
-| Tool | Description |
-|------|-------------|
-| `superset_group_list` | List groups |
-| `superset_group_get` | Get group details with members and roles |
-| `superset_group_create` | Create a new group |
-| `superset_group_update` | Update group name |
-| `superset_group_delete` | Delete a group |
-| `superset_group_add_users` | Add users to a group |
-| `superset_group_remove_users` | Remove users from a group |
-| `superset_group_add_roles` | Add roles to a group |
-| `superset_group_remove_roles` | Remove roles from a group |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_group_list` | Список групп |
+| `superset_group_get` | Информация о группе с участниками и ролями |
+| `superset_group_create` | Создать группу |
+| `superset_group_update` | Изменить название группы |
+| `superset_group_delete` | Удалить группу |
+| `superset_group_add_users` | Добавить пользователей в группу |
+| `superset_group_remove_users` | Убрать пользователей из группы |
+| `superset_group_add_roles` | Добавить роли группе |
+| `superset_group_remove_roles` | Убрать роли у группы |
 
-### Tags (7 tools)
+### Теги (7 инструментов)
 
-| Tool | Description |
-|------|-------------|
-| `superset_tag_list` | List tags |
-| `superset_tag_get` | Get tag details |
-| `superset_tag_create` | Create a tag (optionally bind to objects) |
-| `superset_tag_update` | Update a tag |
-| `superset_tag_delete` | Delete a tag (requires confirmation) |
-| `superset_tag_get_objects` | List objects associated with a tag |
-| `superset_tag_bulk_create` | Create multiple tags at once |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_tag_list` | Список тегов |
+| `superset_tag_get` | Информация о теге |
+| `superset_tag_create` | Создать тег (можно сразу привязать к объектам) |
+| `superset_tag_update` | Изменить тег |
+| `superset_tag_delete` | Удалить тег (нужно подтверждение) |
+| `superset_tag_get_objects` | Объекты, связанные с тегом |
+| `superset_tag_bulk_create` | Создать несколько тегов за раз |
 
-### System & Reports (21 tools)
+### Система и отчёты (21 инструмент)
 
-| Tool | Description |
-|------|-------------|
-| `superset_report_list` | List scheduled reports |
-| `superset_report_get` | Get report details |
-| `superset_report_create` | Create a scheduled report |
-| `superset_report_update` | Update a report |
-| `superset_report_delete` | Delete a report (requires confirmation) |
-| `superset_annotation_layer_list` | List annotation layers |
-| `superset_annotation_layer_get` | Get annotation layer details |
-| `superset_annotation_layer_create` | Create an annotation layer |
-| `superset_annotation_layer_update` | Update an annotation layer |
-| `superset_annotation_layer_delete` | Delete an annotation layer (requires confirmation) |
-| `superset_annotation_list` | List annotations in a layer |
-| `superset_annotation_get` | Get annotation details |
-| `superset_annotation_create` | Create an annotation |
-| `superset_annotation_update` | Update an annotation |
-| `superset_annotation_delete` | Delete an annotation (requires confirmation) |
-| `superset_recent_activity` | Get recent user activity |
-| `superset_log_list` | Get audit logs |
-| `superset_get_menu` | Get Superset menu structure |
-| `superset_get_base_url` | Get configured Superset base URL |
-| `superset_assets_export` | Export all Superset assets as ZIP |
-| `superset_assets_import` | Import assets from ZIP file |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_report_list` | Список отчётов по расписанию |
+| `superset_report_get` | Информация об отчёте |
+| `superset_report_create` | Создать отчёт по расписанию |
+| `superset_report_update` | Изменить отчёт |
+| `superset_report_delete` | Удалить отчёт (нужно подтверждение) |
+| `superset_annotation_layer_list` | Список слоёв аннотаций |
+| `superset_annotation_layer_get` | Информация о слое аннотаций |
+| `superset_annotation_layer_create` | Создать слой аннотаций |
+| `superset_annotation_layer_update` | Изменить слой аннотаций |
+| `superset_annotation_layer_delete` | Удалить слой аннотаций (нужно подтверждение) |
+| `superset_annotation_list` | Аннотации в слое |
+| `superset_annotation_get` | Информация об аннотации |
+| `superset_annotation_create` | Создать аннотацию |
+| `superset_annotation_update` | Изменить аннотацию |
+| `superset_annotation_delete` | Удалить аннотацию (нужно подтверждение) |
+| `superset_recent_activity` | Недавние действия пользователя |
+| `superset_log_list` | Журнал действий (audit log) |
+| `superset_get_menu` | Структура меню Superset |
+| `superset_get_base_url` | Настроенный базовый URL Superset |
+| `superset_assets_export` | Экспорт всех ассетов Superset в ZIP |
+| `superset_assets_import` | Импорт ассетов из ZIP-файла |
 
-### Audit (1 tool)
+### Аудит (1 инструмент)
 
-| Tool | Description |
-|------|-------------|
-| `superset_permissions_audit` | Generate comprehensive permissions matrix |
+| Инструмент | Описание |
+|------------|----------|
+| `superset_permissions_audit` | Построить полную матрицу прав доступа |
 
-## Safety Features
+## Механизмы защиты
 
-The server includes extensive built-in protections to prevent accidental data loss or misconfiguration.
+Сервер включает обширную встроенную защиту от случайной потери данных.
 
-### Confirmation Flags
+### Флаги подтверждения
 
-Destructive operations require explicit confirmation parameters:
+Деструктивные операции требуют явного подтверждения:
 
-| Operation | Required Flag | What It Shows |
-|-----------|--------------|---------------|
-| Delete dashboard | `confirm_delete=True` | Dashboard name, slug, chart count |
-| Delete chart | `confirm_delete=True` | Linked dashboards |
-| Delete dataset | `confirm_delete=True` | Affected charts and dashboards |
-| Delete database | `confirm_delete=True` | Affected datasets, charts |
-| Delete RLS rule | `confirm_delete=True` | Clause, roles, datasets |
-| Delete role | `confirm_delete=True` | Blocks system roles |
-| Delete user | `confirm_delete=True` | Blocks service account deletion |
-| Update chart params | `confirm_params_replace=True` | — |
-| Update dataset columns | `confirm_columns_replace=True` | — |
-| Update database URI | `confirm_uri_change=True` | Affected charts/dashboards |
-| Update user roles | `confirm_roles_replace=True` | Current roles |
-| Set role permissions | `confirm_full_replace=True` | — |
-| Grant dashboard access | `confirm_grant=True` | Dry-run results |
-| Revoke dashboard access | `confirm_revoke=True` | Dry-run results |
-| Bulk add role to users | `confirm=True` | User count, sample list |
-| Bulk remove role from users | `confirm=True` | User count, prevents last role removal |
-| Bulk replace role | `confirm=True` | Old/new role names, user count |
-| Copy role permissions | `confirm=True` | Source/target permission counts |
+| Операция | Требуемый флаг | Что показывает |
+|----------|---------------|----------------|
+| Удаление дашборда | `confirm_delete=True` | Название, slug, количество графиков |
+| Удаление графика | `confirm_delete=True` | Привязанные дашборды |
+| Удаление датасета | `confirm_delete=True` | Затронутые графики и дашборды |
+| Удаление БД | `confirm_delete=True` | Затронутые датасеты, графики |
+| Удаление RLS | `confirm_delete=True` | Clause, роли, датасеты |
+| Удаление роли | `confirm_delete=True` | Блокирует системные роли |
+| Удаление пользователя | `confirm_delete=True` | Блокирует удаление сервисного аккаунта |
+| Обновление params графика | `confirm_params_replace=True` | — |
+| Обновление columns датасета | `confirm_columns_replace=True` | — |
+| Изменение URI БД | `confirm_uri_change=True` | Затронутые графики/дашборды |
+| Обновление ролей пользователя | `confirm_roles_replace=True` | Текущие роли |
+| Установка прав роли | `confirm_full_replace=True` | — |
+| Выдача доступа к дашборду | `confirm_grant=True` | Результат dry-run |
+| Отзыв доступа к дашборду | `confirm_revoke=True` | Результат dry-run |
+| Массовое добавление роли | `confirm=True` | Число пользователей, пример списка |
+| Массовое удаление роли | `confirm=True` | Число пользователей, не даёт убрать последнюю роль |
+| Массовая замена роли | `confirm=True` | Старая и новая роль, число пользователей |
+| Копирование прав роли | `confirm=True` | Число прав у исходной и целевой роли |
 
-### Automatic Protections
+### Автоматическая защита
 
-- **DDL/DML blocking** — SQL Lab rejects `DROP`, `DELETE`, `UPDATE`, `INSERT`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE` (SQL comments are stripped before checking)
-- **System role protection** — cannot delete Admin, Alpha, Gamma, Public roles
-- **Service account protection** — cannot delete the MCP service user
-- **RLS safety** — `rls_update` requires both `roles` and `tables` to prevent silent data wipe
-- **Native filter IDs** — automatically generated in `NATIVE_FILTER-<uuid>` format
-- **Chart validation** — rejects charts without `granularity_sqla` (required for dashboard time filters)
-- **Auto-sync** — datasource_access permissions are automatically synchronized when dashboard roles change
+- **Блокировка DDL/DML** — SQL Lab отклоняет `DROP`, `DELETE`, `UPDATE`, `INSERT`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE` (SQL-комментарии вырезаются перед проверкой)
+- **Защита системных ролей** — нельзя удалить Admin, Alpha, Gamma, Public
+- **Защита сервисного аккаунта** — нельзя удалить MCP-пользователя
+- **Безопасность RLS** — `rls_update` требует одновременно `roles` и `tables`, чтобы данные не стёрлись молча
+- **ID нативных фильтров** — автоматически генерируются в формате `NATIVE_FILTER-<uuid>`
+- **Валидация графиков** — отклоняет графики без `granularity_sqla` (без него не работают фильтры по времени на дашборде)
+- **Авто-синхронизация** — права `datasource_access` автоматически синхронизируются при изменении ролей дашборда
 
-## Architecture
+## Архитектура
 
 ```
 superset-mcp/
-├── pyproject.toml              # Package configuration
-├── .env.example                # Environment variable template
-├── LICENSE                     # MIT License
-├── README.md                   # This file
-├── README_RU.md                # Russian documentation
-├── CHANGELOG.md                # Version history
+├── pyproject.toml              # Конфигурация пакета
+├── .env.example                # Шаблон переменных окружения
+├── LICENSE                     # Лицензия MIT
+├── README.md                   # Документация (этот файл)
+├── CHANGELOG.md                # История версий
 └── src/mcp_superset/
-    ├── __init__.py             # Package init with __version__
-    ├── __main__.py             # CLI entry point with argparse
-    ├── server.py               # FastMCP server setup and configuration
-    ├── auth.py                 # JWT authentication (login, refresh, CSRF)
-    ├── client.py               # HTTP client (auto-auth, retry, RISON pagination)
-    ├── models.py               # Pydantic models
+    ├── __init__.py             # Инициализация с __version__
+    ├── __main__.py             # CLI с argparse
+    ├── server.py               # Настройка FastMCP-сервера
+    ├── auth.py                 # JWT-аутентификация (login, refresh, CSRF)
+    ├── client.py               # HTTP-клиент (авто-аутентификация, retry, RISON-пагинация)
+    ├── models.py               # Pydantic-модели
     └── tools/
         ├── __init__.py         # register_all_tools()
-        ├── helpers.py          # Auto-sync datasource_access logic
-        ├── dashboards.py       # Dashboard + filter tools (20)
-        ├── charts.py           # Chart tools (11)
-        ├── databases.py        # Database tools (18)
-        ├── datasets.py         # Dataset tools (11)
-        ├── queries.py          # SQL Lab + saved query tools (13)
-        ├── security.py         # User, role, permission, RLS, bulk operations (26)
-        ├── groups.py           # Group management tools (9)
-        ├── audit.py            # Permissions audit tool (1)
-        ├── tags.py             # Tag tools (7)
-        └── system.py           # Reports, annotations, logs, assets (21)
+        ├── helpers.py          # Авто-синхронизация datasource_access
+        ├── dashboards.py       # Дашборды + фильтры (20)
+        ├── charts.py           # Графики (11)
+        ├── databases.py        # Базы данных (18)
+        ├── datasets.py         # Датасеты (11)
+        ├── queries.py          # SQL Lab + сохранённые запросы (13)
+        ├── security.py         # Пользователи, роли, права, RLS, массовые операции (26)
+        ├── groups.py           # Группы (9)
+        ├── audit.py            # Аудит прав (1)
+        ├── tags.py             # Теги (7)
+        └── system.py           # Отчёты, аннотации, логи, ассеты (21)
 ```
 
-## Superset Compatibility
+## Совместимость с Superset
 
-- **Tested with**: Apache Superset 6.0.1
-- **Authentication**: JWT (recommended) — API Key (`sst_*`) is not implemented in Superset
-- **Required Superset user**: Admin role (for full API access)
+- **Протестировано с**: Apache Superset 6.0.1
+- **Аутентификация**: JWT (рекомендуется) — API Key (`sst_*`) не реализован в Superset
+- **Требуемый пользователь**: роль Admin (для полного доступа к API)
 
-### Recommended Superset Configuration
+### Рекомендуемая настройка Superset
 
-Add to your `superset_config.py`:
+Добавьте в `superset_config.py`:
 
 ```python
 from datetime import timedelta
 
-# Increase JWT token lifetime (default is 15 min)
+# Увеличить время жизни JWT-токена (по умолчанию 15 мин)
 JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
 JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)
 
-# Max API page size
+# Максимальный размер страницы API
 FAB_API_MAX_PAGE_SIZE = 100
 ```
 
-## Development
+## Разработка
 
-### Setup
+### Настройка окружения
 
 ```bash
 git clone https://github.com/AliakseiAliaksandrau/mcp-superset-sso.git
-cd superset-mcp
+cd mcp-superset-sso
 
-# Create virtual environment and install in editable mode
+# Создать виртуальное окружение и установить в режиме разработки
 uv venv
 uv pip install -e ".[dev]"
 
-# Copy and configure .env
+# Скопировать и настроить .env
 cp .env.example .env
-# Edit .env with your Superset credentials
+# Отредактируйте .env с вашими данными Superset
 ```
 
-### Running Locally
+### Локальный запуск
 
 ```bash
-# Run from source
+# Запуск из исходников
 uv run python -m mcp_superset
 
-# Or with CLI
+# Или через CLI
 uv run mcp-superset --port 8001
 ```
 
-### Running Tests
+### Запуск тестов
 
 ```bash
 uv run python test_all_tools.py
 ```
 
-## Known Superset API Quirks
+## Особенности API Superset
 
-These are handled automatically by the MCP server, but useful to know when debugging:
+MCP-сервер обрабатывает их сам, но при отладке полезно о них знать:
 
-| Quirk | Details |
-|-------|---------|
-| RISON pagination | Superset ignores `page`/`page_size` as query params; must use RISON in `q` parameter |
-| CSRF required | All POST/PUT/DELETE need `X-CSRFToken` header + session cookie |
-| Referer required | SQL Lab returns 403 without `Referer` header |
-| Tag API returns `{}` | Tag creation doesn't return the ID; must query list |
-| Tag update needs `name` | Field is mandatory even if unchanged |
-| Role permissions replace | `POST /security/roles/{id}/permissions` replaces ALL permissions |
-| RLS update replaces | `PUT /rowlevelsecurity/{id}` replaces ALL provided fields |
-| Dataset update columns | `PUT /dataset/{id}` with `columns` replaces ALL columns |
-| Dashboard copy | Requires `json_metadata` (can be `"{}"`) |
-| Native filter IDs | Must be `NATIVE_FILTER-<uuid>` format |
-| `filter_time` needs `granularity_sqla` | Charts without it silently ignore time filters |
-| Number formatting | `SMART_NUMBER` abbreviates; use `,d` or `,.2f` for exact |
+| Особенность | Подробности |
+|-------------|-------------|
+| Пагинация через RISON | Superset игнорирует `page`/`page_size` в query-параметрах; нужен RISON в параметре `q` |
+| Нужен CSRF | Для всех POST/PUT/DELETE нужны заголовок `X-CSRFToken` и session cookie |
+| Нужен Referer | SQL Lab возвращает 403 без заголовка `Referer` |
+| API тегов возвращает `{}` | При создании тега ID не возвращается; его приходится искать в списке |
+| Обновлению тега нужен `name` | Поле обязательно, даже если не меняется |
+| Права роли заменяются | `POST /security/roles/{id}/permissions` заменяет ВСЕ права роли |
+| RLS заменяется | `PUT /rowlevelsecurity/{id}` заменяет ВСЕ переданные поля |
+| Колонки датасета заменяются | `PUT /dataset/{id}` с `columns` заменяет ВСЕ колонки |
+| Копирование дашборда | Нужен `json_metadata` (можно `"{}"`) |
+| ID нативных фильтров | Должны быть в формате `NATIVE_FILTER-<uuid>` |
+| `filter_time` требует `granularity_sqla` | Графики без него молча игнорируют фильтры по времени |
+| Форматирование чисел | `SMART_NUMBER` сокращает числа; для точных значений используйте `,d` или `,.2f` |
 
-## License
+## Лицензия
 
 [MIT](LICENSE) — Stanislav Chernov ([@bintocher](https://github.com/bintocher))
